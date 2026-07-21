@@ -9,7 +9,6 @@ on:
       - ready_for_review
 
 permissions:
-  contents: write
   pull-requests: write
 
 concurrency:
@@ -27,6 +26,7 @@ jobs:
             const EXPECTED_BASE = "dev";
             const TITLE_PREFIX = "[WRONG BRANCH] ";
             const COMMENT_MARKER = "<!-- wrong-branch-enforcer -->";
+            const MAINTAINERS = ['lidge-jun', 'igwanu'];
             const STATE_PATTERN =
               /<!-- wrong-branch-enforcer-state:([\s\S]*?) -->/;
 
@@ -40,6 +40,15 @@ jobs:
               repo,
               pull_number
             });
+
+            // Allow maintainers to target any branch (main, preview, etc.)
+            const actor = pr.user.login;
+            if (MAINTAINERS.includes(actor)) {
+              core.info(
+                `Maintainer ${actor} is allowed to target any branch.`
+              );
+              return;
+            }
 
             // Find the workflow's existing comment. Its hidden state records
             // whether the workflow changed the title or draft status.
