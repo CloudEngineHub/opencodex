@@ -235,3 +235,14 @@ Malformed or unreadable records remain unknown. Recovery requires the same compl
 identity and proven-dead liveness; unknown or transferred ownership never starts another proxy.
 Direct recovery retains the lease until readiness or its bounded deadline. The normal successful
 manual-runtime update still prints the existing restart hint.
+
+The probe ceilings are module-load constants in `src/server/proxy-liveness.ts`: 750 ms for the
+shared default and 1500 ms (three attempts) for `SERVICE_STOP_LIVENESS` and
+`START_OWNERSHIP_LIVENESS`. `OCX_PROBE_TIMEOUT_MS` (whole milliseconds, 1 to 30000) only raises
+them for hosts whose loopback connects are slowed by a security layer; each ceiling keeps its floor,
+so an override can never shorten the budgets that prevent a duplicate proxy, and a value above the
+30 s ceiling is ignored so the single-shot stop deadline (`timeoutMs * attempts + 250` in
+`src/service/orchestration.ts`) stays bounded. `tests/server/probe-timeout-env.test.ts` reads the
+constants in child processes.
+
+`src/update/install-detection.mjs` examines both lexical and resolved package paths. An enclosing mise installation owns its nested npm/aube package only when the adjacent `.mise.backend.toml` identifies the containing tool alias and the canonical `npm:@bitkyc08/opencodex` backend. That verified outer owner takes precedence over the inner npm layout. Two verified owners whose tool roots differ only by a symlinked ancestor (macOS `/var` -> `/private/var`) are compared by canonical directory and count as one install. An unreadable or contradictory ownership boundary on either path takes precedence over a verified owner on the other path, refusing mutation without inventing a tool name or recovery command. `ocx update`, dashboard update checks, and update workers expose `installer: "mise"`; checks remain read-only, while mutation is refused with `mise upgrade <verified-alias>` before any proxy stop, package write, or worker creation. The package-tree integrity guard remains active for mise packages.
