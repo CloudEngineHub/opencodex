@@ -1,5 +1,9 @@
 # Docs And Release
 
+Automatic package-tree restart holds a releasable data-plane drain until its scheduled
+service-home check succeeds. A veto releases that fence; a committed shutdown uses the
+permanent drain latch.
+
 macOS shards and control use the shared fresh-process batch runner described below.
 `scripts/ci/sample-macos-stall.sh` remains a standalone diagnostic helper with isolated
 observer regression coverage; it is not wired into those bounded batch steps. It samples
@@ -308,6 +312,18 @@ Invariants:
 - Public docs (root READMEs + `docs-site` installation pages, all locales) state Node 18+ as the only
   prerequisite. Do not reintroduce "install Bun first" / "bun must be on PATH" guidance for npm users.
 
+### Package-tree integrity fence
+
+Installed npm, bun, and pnpm packages bind each server process to the package manifest identity
+observed at startup. Replacing that manifest under a live process fences `/healthz`, `/readyz`, and
+`/v1/*` with `package_tree_changed`. The first observed replacement starts an unref'd five-second
+stability timer; if the same new manifest identity remains readable and distinct, the timer enters the existing
+drain-and-restart handoff without waiting for another request. A temporarily unreadable manifest
+is polled until readable and then receives a fresh full stability interval, while a return to the
+startup identity cancels the pending restart. Failed restart admission retries after the same
+bounded delay. Stopping the server before the accepted restart begins vetoes it, and a service child
+restarts only while it still owns the service home. Source checkouts and standalone binaries remain outside this fence.
+
 ## Release workflow
 
 Package release is npm-focused. `package.json` exposes `opencodex` and `ocx`, `prepublishOnly` runs
@@ -453,17 +469,9 @@ user-scoped test-run queue with `OCX_TEST_NO_QUEUE=1`: the batches already run s
 dedicated job, and queueing a new batch behind a surviving process from the preceding batch spends
 the process timeout without executing tests. The per-process home isolation and live-home/service
 manager guards remain active because the preload installs them before the lock boundary.
-`tests/preload.ts` resolves cleanup dependencies after home/lock admission and before test cases,
-then teardown awaits native-main startup releases and config hardening, followed by the sandbox's
-registered ACL child reaps before removing that root. Its synchronous exit fallback leaves an
-undrained root for ownership-checked stale recovery instead of blocking child cleanup with removal
-retries. `tests/ci-workflows/test-sandbox-cleanup.test.ts` pins that ordering with a delayed reap.
-`tests/helpers/test-sandbox-cleanup.ts` also exposes case-scoped lifecycle ownership: cancellation
-starts listener stops while owned asynchronous work settles, and repeated close/stop calls share
-one promise. After teardown starts only the lifecycle's own abort reason is absorbed; any other
-error, including a foreign AbortError, still fails its case.
-Callers settle that lifecycle before draining producers/reaps and restoring or removing a home;
-the helper does not replace fixture-specific cleanup or claim OS ACL coverage for synthetic tests.
+Test teardown follows the [sandbox cleanup contract](test-sandbox-cleanup.md).
+`tests/preload.ts` resolves cleanup dependencies after home/lock admission and before test cases; teardown awaits native-main startup releases and config hardening, then the sandbox's registered ACL child reaps before removing that root. Its synchronous exit fallback leaves an undrained root for ownership-checked stale recovery instead of blocking child cleanup with removal retries. `tests/ci-workflows/test-sandbox-cleanup.test.ts` pins that ordering with a delayed reap.
+`tests/helpers/test-sandbox-cleanup.ts` exposes case-scoped lifecycle ownership: cancellation starts listener stops while owned asynchronous work settles, and repeated close/stop calls share one promise. After teardown starts, only the lifecycle's own abort reason is absorbed; any other error, including a foreign AbortError, still fails its case. Callers settle that lifecycle before draining producers/reaps and restoring or removing a home. The helper does not replace fixture-specific cleanup or claim OS ACL coverage for synthetic tests.
 A test failure, a process timeout and a Bun runtime crash each fail their job on the first occurrence; the
 batch runner still sweeps a crashed or timed-out batch one file per process, but only to attribute a
 failure the shard has already taken. The aggregate `ci` gate derives, from the event and the `changes` outputs, which
@@ -580,13 +588,7 @@ Native steering generation overrides, explicit public-API eligibility and the co
 The public server configuration reference documents the optional
 [compaction routing override](../transports/responses.md#compaction-routing-overrides). Its regression file is registered in both test-layout inventories.
 
-Startup and explicit catalog synchronization in `src/codex/sync.ts` refresh the optional
-`src/providers/reasoning-metadata.ts` effort snapshot for supported destinations before catalog
-gathering. Each sync waits at most two seconds for a fresh or shared fetch, then continues with
-the existing snapshot; the fetch retains its own abort deadline. Routed effort reads in
-`src/reasoning-effort.ts` use a snapshot immediately and request a best-effort background refresh
-only when an existing snapshot answers with an expired ladder. Missing or corrupt snapshots do
-not fetch on the request path; catalog sync owns their bootstrap.
+Catalog synchronization follows the [reasoning metadata refresh contract](../catalog.md#reasoning-metadata-refresh).
 
 Bun updater ownership and recovery follow the [service transaction contract](service-and-sidecars.md#bun-updater-ownership-transaction).
 
