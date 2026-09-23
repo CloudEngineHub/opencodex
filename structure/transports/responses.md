@@ -372,6 +372,12 @@ readable user text, and records `conversationStateScrub: "account-change"` on th
 without account identifiers. Once the new account issues its own state, later turns carry it
 normally. `canPortConversationState` is local until `src/routing/identity-domains.ts` lands.
 
+Precommit Codex model refusals use the same bounded account recovery for HTTP `detail` and
+WebSocket-projected `error.message` bodies. Only an exact HTTP 400 refusal naming the requested
+or wire model establishes denial evidence; ordinary malformed requests and committed stream
+errors do not authorize another send. Account selectors, uploaded files and send budgets retain
+their existing restrictions.
+
 ### Uploaded files do not move between accounts
 
 An uploaded `file_id` has always been classified as account-bound, and the scrub has always
@@ -1252,7 +1258,10 @@ during this process's lifetime can still be released for free.
 Settlement follows what the request learned. The terminal usage belongs to the last send that
 left, so that one settles with the real figure; every earlier send failed without reporting usage
 of its own and may still have been billed, so it becomes unresolved spend rather than free. A
-request that reports no usage at all leaves all of them unresolved.
+request that reports no usage at all leaves all of them unresolved. If a deferred settlement
+reaches a tracker with reserved sends after its ledger lease ends, only the resulting
+`SPEND_LEDGER_OWNER_NOT_HELD` is dropped with the discarded ledger. Other owner and storage
+failures propagate with pending send IDs intact so settlement can be retried.
 
 Replay resolves what nobody is left to settle, and resolves it as unresolved spend whatever state
 it was in. Giving an undispatched one its tokens back would assume the journal is complete up to
