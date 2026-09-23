@@ -436,13 +436,16 @@ traversing their targets. Unknown files remain in place and make the command rep
 uninstall with their exact paths.
 
 The newly created OAuth downgrade copy is registered after copying, so owned uninstall
-includes it. Invalid-config recovery copies are deliberately NOT registered: their names carry
+includes it. Destructive OAuth mutations rewrite that copy without the removed provider through the
+no-follow writer variant that leaves the owner manifest untouched, so a copy an earlier install
+left unregistered stays unclaimed. Invalid-config recovery copies are deliberately NOT registered: their names carry
 a timestamp, so one entry per invalid load would grow the uninstall manifest without bound, and
 the manifest stops validating past its path ceiling. A manifest that stops validating makes
 uninstall refuse outright, which would leave credentials on disk. Sweeping those copies by name
 pattern at removal time is the shape that fits; it is not in this change. Registration is best-effort: an intentionally
-unowned legacy home or a metadata-write failure must not suppress the recovery copy. Existing
-OAuth downgrade copies are neither rewritten nor retroactively claimed. Both a `false` registration
+unowned legacy home or a metadata-write failure must not suppress the recovery copy. Migration
+leaves an existing OAuth downgrade copy unchanged and never retroactively claims it; only a
+destructive mutation rewrites it, to drop the removed provider. Both a `false` registration
 result and a thrown registration error emit the same fixed warning without error details. Unregistered copies
 remain subject to the existing partial/refused uninstall result.
 
@@ -564,7 +567,17 @@ Stored Direct substitution follows the [credential identity contract](providers/
 configuration. An explicit SOCKS5 or SOCKS5h URL selects ALL_PROXY and removes
 stale scheme-proxy variables; HTTP(S) settings retain their existing environment
 precedence. Activation keeps the existing Windows auto-discovery path and loopback
-NO_PROXY entries. When the environment no longer selects SOCKS, activation
+NO_PROXY entries; the no-configured-proxy return merges all of them only when an inherited
+SOCKS proxy is the only inherited proxy; whenever Bun applies an inherited HTTP(S) scheme proxy
+or HTTP(S) `ALL_PROXY`/`all_proxy`, it matches by domain suffix, so activation adds only the
+loopback addresses (never `localhost`); a proxy-free
+process is left untouched. The in-process
+matcher treats a bare `localhost` or IP-literal entry as one host, never a suffix. When opposite-case
+`ALL_PROXY` and `all_proxy` provide SOCKS and HTTP(S) together, the SOCKS wrapper forces an exact
+`localhost` request direct while keeping the address-only environment bypass. An inherited non-empty
+lowercase `no_proxy`, which Bun fetch reads first with suffix matching, receives only the loopback
+addresses, never a name it would match as a suffix. When the
+environment no longer selects SOCKS, activation
 restores the native fetch; removing a saved field alone does not erase inherited
 process environment variables.
 SOCKS4 is rejected instead of being advertised as a working transport.
