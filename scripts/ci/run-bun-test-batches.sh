@@ -53,10 +53,76 @@ if [[ -n "$TEST_PARALLEL" && ! "$TEST_PARALLEL" =~ ^[1-9][0-9]*$ ]]; then
   echo "BUN_TEST_PARALLEL must be a positive integer" >&2
   exit 64
 fi
-if ! command -v timeout >/dev/null 2>&1; then
-  echo "GNU timeout is required to bound Bun test batches." >&2
+
+# Every batch runs under a process deadline. GNU timeout provides it on Linux and in Git for
+# Windows; the probe runs the exact option shape used below, so a BSD or busybox `timeout` that
+# rejects it falls through to the portable deadline instead of failing each batch.
+if command -v timeout >/dev/null 2>&1 && timeout --signal=TERM --kill-after=1s 1s true >/dev/null 2>&1; then
+  BATCH_DEADLINE=gnu
+elif command -v perl >/dev/null 2>&1; then
+  BATCH_DEADLINE=portable
+  echo "::notice::GNU timeout is unavailable; each batch keeps its ${BATCH_TIMEOUT_SECONDS}s deadline through the portable process-group fallback."
+else
+  echo "GNU timeout, or perl for the portable fallback, is required to bound Bun test batches." >&2
   exit 69
 fi
+readonly BATCH_DEADLINE
+
+# Stand-in for `timeout --signal=TERM --kill-after=GRACE SECONDS cmd...` where GNU timeout is
+# unavailable (macOS ships none). It keeps the contract the disposition below reads: the command
+# leads its own process group, the whole group gets TERM at the deadline and KILL after the grace
+# period, and a timed-out run reports 124 -- or 137 when the command itself needed KILL, which is
+# what GNU timeout reports because it signals its own group. Unlike GNU it also KILLs group members
+# still alive after the command exits on TERM, so a hung batch cannot leave children behind.
+run_with_batch_deadline() {
+  local seconds="$1"
+  local grace="$2"
+  shift 2
+  local marker child watchdog status=0
+
+  marker="$(mktemp -t ocx-bun-test-deadline.XXXXXX)"
+  perl -e 'setpgrp(0, 0) or die "setpgrp: $!\n"; exec { $ARGV[0] } @ARGV or die "exec $ARGV[0]: $!\n";' -- "$@" &
+  child=$!
+
+  # Output goes to /dev/null so the watchdog never holds the caller's tee pipe open.
+  (
+    nap=""
+    trap '[[ -z "$nap" ]] || kill "$nap" 2>/dev/null; exit 0' TERM
+    sleep "$seconds" & nap=$!
+    wait "$nap" || exit 0
+    nap=""
+    kill -0 -- "-$child" 2>/dev/null || exit 0
+    echo timeout > "$marker"
+    kill -TERM -- "-$child" 2>/dev/null || true
+    kill -CONT -- "-$child" 2>/dev/null || true
+    waited=0
+    while (( waited < grace )) && kill -0 -- "-$child" 2>/dev/null; do
+      sleep 1
+      waited=$(( waited + 1 ))
+    done
+    kill -KILL -- "-$child" 2>/dev/null || true
+  ) >/dev/null 2>&1 &
+  watchdog=$!
+
+  trap 'kill -TERM -- "-$child" 2>/dev/null || true' INT TERM HUP
+  # A trapped signal interrupts wait with a status above 128 while the command still runs (or is
+  # an unreaped zombie, which kill -0 still sees); wait again for its real status.
+  while :; do
+    wait "$child" && status=0 || status=$?
+    kill -0 "$child" 2>/dev/null || break
+  done
+  trap - INT TERM HUP
+
+  if [[ -s "$marker" ]]; then
+    wait "$watchdog" 2>/dev/null || true
+    if (( status == 137 )); then status=137; else status=124; fi
+  else
+    kill -TERM "$watchdog" 2>/dev/null || true
+    wait "$watchdog" 2>/dev/null || true
+  fi
+  rm -f -- "$marker"
+  return "$status"
+}
 
 is_general_test_file() {
   local path="$1"
@@ -104,9 +170,14 @@ run_test_once() {
   printf '  %s\n' "${files[@]}"
 
   set +e
-  timeout --signal=TERM --kill-after="${BATCH_KILL_GRACE_SECONDS}s" \
-    "${BATCH_TIMEOUT_SECONDS}s" \
-    "$BUN_BIN" test --isolate ${PARALLEL_ARG:+"$PARALLEL_ARG"} --timeout 60000 "${files[@]}" 2>&1 | tee "$log_file"
+  if [[ "$BATCH_DEADLINE" == "gnu" ]]; then
+    timeout --signal=TERM --kill-after="${BATCH_KILL_GRACE_SECONDS}s" \
+      "${BATCH_TIMEOUT_SECONDS}s" \
+      "$BUN_BIN" test --isolate ${PARALLEL_ARG:+"$PARALLEL_ARG"} --timeout 60000 "${files[@]}" 2>&1 | tee "$log_file"
+  else
+    run_with_batch_deadline "$BATCH_TIMEOUT_SECONDS" "$BATCH_KILL_GRACE_SECONDS" \
+      "$BUN_BIN" test --isolate ${PARALLEL_ARG:+"$PARALLEL_ARG"} --timeout 60000 "${files[@]}" 2>&1 | tee "$log_file"
+  fi
   status="${PIPESTATUS[0]}"
   set -e
 
