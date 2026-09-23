@@ -35,6 +35,7 @@ import { consumeComboFailure } from "./core-combo-failure";
 import { readDisplaySafeErrorText } from "./core-errors";
 import { streamingContextOverflowResponse, jsonContextOverflowResponse } from "./context-overflow";
 import { formatPassthroughUpstreamError } from "./passthrough-error";
+import { rewriteUpstreamPolicyRefusal } from "./policy-refusal";
 import {
   resolvePassthroughWebSearchBridgeAuth,
   planPassthroughWebSearchBridge,
@@ -84,6 +85,12 @@ import {
   createGrokResponsesTimestampBlockRewrite,
 } from "../grok-responses-control-frame";
 import { createGrokResponsesSparseTerminalBlockRewrite } from "../grok-responses-snapshot-repair";
+import { isXaiResponsesDestination } from "../../providers/xai-transport";
+import {
+  createGrokUpstreamEnvelopeEchoBlockRewrite,
+  responsesRequestMayReplayToolOutput,
+  stripGrokUpstreamEnvelopeEchoFromResponsesJson,
+} from "../grok-upstream-envelope-echo";
 import {
   createPlaintextV2AgentMessageCallRestoreRewrite,
   restorePlaintextV2AgentMessageCallsInJsonResult,
@@ -326,6 +333,16 @@ export async function deliverPassthroughResponse(
           ? streamingContextOverflowResponse(parsed._responseModelId ?? parsed.modelId, translatorBudget)
           : jsonContextOverflowResponse();
       }
+      const policyRefusal = rewriteUpstreamPolicyRefusal({
+        status: upstreamResponse.status,
+        errorText,
+        stream: clientRequestedStream,
+        modelId: parsed._responseModelId ?? parsed.modelId,
+        destinationIsXai: isXaiResponsesDestination(route.provider),
+        translatorBudget,
+        turnAdmissionLease: options.turnAdmissionLease,
+      });
+      if (policyRefusal) return policyRefusal;
       return formatPassthroughUpstreamError(upstreamResponse.status, errorText, {
         statusText: upstreamResponse.statusText,
         headers,
@@ -356,6 +373,8 @@ export async function deliverPassthroughResponse(
     // (src/server/relay-eager.ts; policy:
     // devlog/_fin/260731_macos_rss_retention/100_darwin_eager_optin.md).
     // The bundled known-bad runtime remains on tee by default on both platforms.
+    const grokUpstreamEchoEnabled = isXaiResponsesDestination(route.provider)
+      && responsesRequestMayReplayToolOutput(parsed._rawBody);
     if (isEventStream && upstreamResponse.body) {
       // For streamed passthrough, a successful terminal response means non-error upstream status
       // before relay starts. Waiting for SSE completion would retain request state across the whole
@@ -500,7 +519,7 @@ export async function deliverPassthroughResponse(
       // are not the Responses wire shapes the snapshot must mirror.
       // Only validated client blocks may publish plaintext continuation state.
       // Raw inspection precedes rewriting on eager relays, so it cannot own this write.
-      const plaintextInspector = responseEffects.plaintextV2AgentMessageToolNames.size > 0
+      const plaintextInspector = !grokUpstreamEchoEnabled && responseEffects.plaintextV2AgentMessageToolNames.size > 0
         ? createSseInspector({ onCompletedResponse: rememberPassthroughResponseChecked })
         : undefined;
       const plaintextEncoder = plaintextInspector ? new TextEncoder() : undefined;
@@ -571,6 +590,11 @@ export async function deliverPassthroughResponse(
             declaredBareWireToolNames,
           )
           : undefined,
+        grokUpstreamEchoEnabled
+          ? createGrokUpstreamEnvelopeEchoBlockRewrite(
+            rememberPassthroughResponse ? rememberPassthroughResponseChecked : undefined,
+          )
+          : undefined,
         rememberPlaintextBlock,
       ].filter((rewrite): rewrite is NonNullable<typeof rewrite> => rewrite !== undefined);
       const clientBlockRewrite = blockRewrites.length > 0
@@ -620,7 +644,7 @@ export async function deliverPassthroughResponse(
         const inspector = createSseInspector({
           onTerminal: reportNativeTerminal,
           logCtx,
-          onCompletedResponse: rememberPassthroughResponse && responseEffects.plaintextV2AgentMessageToolNames.size === 0 ? rememberPassthroughResponseChecked : undefined,
+          onCompletedResponse: rememberPassthroughResponse && !grokUpstreamEchoEnabled && responseEffects.plaintextV2AgentMessageToolNames.size === 0 ? rememberPassthroughResponseChecked : undefined,
           onParsedPayload: noteInspectedPayload,
           onFirstOutput: options.onFirstOutput,
           pinCompletedResponseIdToFirstSeen: githubCopilotRepairEnabled,
@@ -722,7 +746,7 @@ export async function deliverPassthroughResponse(
             responseEffects.responseCompletionCancelled = true;
             options.onNativePassthroughCancel?.();
           },
-          rememberPassthroughResponse && responseEffects.plaintextV2AgentMessageToolNames.size === 0 ? rememberPassthroughResponseChecked : undefined,
+          rememberPassthroughResponse && !grokUpstreamEchoEnabled && responseEffects.plaintextV2AgentMessageToolNames.size === 0 ? rememberPassthroughResponseChecked : undefined,
           options.onFirstOutput,
           inspectionConsumerOptions,
         );
@@ -732,7 +756,7 @@ export async function deliverPassthroughResponse(
           logCtx,
           turnAc.signal,
           () => unregisterTurn(turnAc),
-          rememberPassthroughResponse && responseEffects.plaintextV2AgentMessageToolNames.size === 0 ? rememberPassthroughResponseChecked : undefined,
+          rememberPassthroughResponse && !grokUpstreamEchoEnabled && responseEffects.plaintextV2AgentMessageToolNames.size === 0 ? rememberPassthroughResponseChecked : undefined,
           options.onFirstOutput,
           inspectionConsumerOptions,
         );
@@ -814,6 +838,9 @@ export async function deliverPassthroughResponse(
       if (plaintextV2RestoreFailed) {
         return formatErrorResponse(502, "upstream_error", PLAINTEXT_V2_AGENT_MESSAGE_RESTORE_OVERFLOW_MESSAGE);
       }
+      if (grokUpstreamEchoEnabled) {
+        clientJson = stripGrokUpstreamEnvelopeEchoFromResponsesJson(clientJson);
+      }
       // #1700: same fail-closed policy as the SSE relay above. Both the plain JSON answer and
       // the reframed-SSE branch below are built from this body, so one check covers them. This
       // runs BEFORE the continuation cache write below: a refused turn must not become state a
@@ -844,7 +871,7 @@ export async function deliverPassthroughResponse(
       commitReasoningReplayServingRoute(nativeExchange.request.headers);
       try {
         rememberPassthroughResponseChecked(
-          JSON.parse(text) as { id?: unknown; output?: unknown; status?: unknown; model?: unknown },
+          JSON.parse(grokUpstreamEchoEnabled ? clientJson : text) as { id?: unknown; output?: unknown; status?: unknown; model?: unknown },
         );
       } catch { /* non-JSON despite content-type; recording is best-effort */ }
       // #875: the transport-neutral reliability policy forced a bounded JSON
