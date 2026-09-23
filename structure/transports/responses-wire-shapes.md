@@ -15,6 +15,16 @@ different custom destination does not inherit its upstream assumptions. Object-f
 also narrow the decision by inbound protocol and authentication mode; an auth-scoped default must
 not leak from a subscription transport into an API-key or forwarded-credential route.
 
+Alibaba Token Plan (Beijing) keeps `openai-chat` provider-wide but defaults `qwen3.8-flash`,
+`qwen3.7-plus` and `glm-5.3` to `openai-responses` for Responses inbound only; Chat and Anthropic
+inbound stay on Chat and its measured prefix-cache behavior. The entry sets
+`preserveResponsesReasoningContent` beside the pins, because the Responses serializer reads that
+flag rather than the Chat-side `preserveReasoningContentModels` list, and this gateway accepted
+replayed plaintext reasoning content live. `qwen3.7-plus` sends effort as a `reasoning.effort`
+string on this wire instead of the numeric `thinking_budget` the Chat wire applies. The intl sibling
+stays unpinned. `tests/providers/alibaba-token-plan-wire-defaults.test.ts` covers the pins and the
+replay flag.
+
 xAI keeps `openai-chat` as its provider-wide compatibility wire, but Grok 4.5/4.6/4.7 subscription
 Responses requests default to native `openai-responses`. Existing namespace, hosted-search and
 reasoning-replay normalization remains in force. The reserved `xai` OAuth transport is name-pinned
@@ -167,9 +177,14 @@ OpenCode Go's exact `union-alpha` model id is hard-pinned to the Anthropic wire 
 surface; sibling models retain their existing Chat or Responses selection. This wire choice and the
 session namespace do not assert upstream availability after the Messages endpoint accepts the
 session header.
-Muse Spark's Responses sanitizer also drops the provider-rejected `search_content_types` and
-`indexed_web_access` fields from plain `web_search` tools while preserving preview tools and
-unrelated models.
+`src/adapters/openai-responses/web-search.ts` also drops the provider-rejected
+`search_content_types` and `indexed_web_access` fields from plain `web_search` tools while
+preserving preview tools. The two OpenCode Zen destinations gate that on a Contributor Muse id
+because they serve nothing else; on the direct Meta destination (`https://api.meta.ai/v1/responses`)
+the destination is the whole predicate, because Meta's refusal is a gateway schema rule for every
+Muse model it serves, its default `muse-spark-1.3` is not a Contributor id, and a missing model id
+still strips. Because the predicate is the host, a custom provider pointed at that exact URL gets the
+same strip.
 
 Direct Meta Muse / Meta Model Responses (`https://api.meta.ai/v1`) also rejects function tool
 names longer than 64 characters or containing characters outside `[a-zA-Z0-9_-]`. After namespace
