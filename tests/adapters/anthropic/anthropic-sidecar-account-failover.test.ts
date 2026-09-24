@@ -73,7 +73,7 @@ beforeAll(async () => {
       incomingMeta: IncomingMeta;
       fetchForRequest: (request: AdapterRequest, parsed: OcxParsedRequest) => typeof fetch;
       on429?: (retryAfter: string | null) => Promise<
-        ProviderAdapter | { adapter: ProviderAdapter; recoveryKind: AttemptRecoveryKind } | null
+        { adapter: ProviderAdapter; recoveryKind: AttemptRecoveryKind } | null
       >;
     }) => {
       // This is a dispatch seam test. The real loop is covered in anthropic-quota-dispatch.
@@ -89,7 +89,6 @@ beforeAll(async () => {
       // Unwrapped exactly as the real loop does. This seam drives the PRODUCTION rotator
       // (`rotateSidecarProviderOn429`), so it is the one place the Anthropic arm's kind is
       // proven end to end rather than against a hand-written stub.
-      if (!("recoveryKind" in rotated)) throw new Error("the Anthropic pool arm must report its recovery kind");
       expect(rotated.recoveryKind).toBe("anthropic-oauth-429");
       const second = await rotated.adapter.buildRequest(args.parsed, args.incomingMeta);
       return args.fetchForRequest(second, args.parsed)(second.url, {

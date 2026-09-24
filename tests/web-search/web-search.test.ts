@@ -1149,7 +1149,7 @@ describe("web-search sidecar native web_search_call emission", () => {
         if (!retryParsed) throw new Error("the loop must pass the iteration request to on429");
         retryParsed._kiroAuthContext = { apiRegion: "ap-southeast-2", profileArn: "account-b" };
         delete retryParsed._providerContinuation;
-        return rotatedAdapter;
+        return { adapter: rotatedAdapter, recoveryKind: "key-429" };
       },
     });
     expect(response.status).toBe(200);
@@ -1177,14 +1177,14 @@ describe("web-search sidecar native web_search_call emission", () => {
   // An account rotation and a key rotation are different operator-facing events, and the
   // rotated fetch's recovery kind is the only place the attempt row records which happened.
   // The loop used to hardcode `key-429` for both.
-  test("429 rotation reports the rotator's recovery kind, defaulting to key-429", async () => {
+  test("429 rotation reports the rotator's recovery kind", async () => {
     globalThis.fetch = (() => Promise.resolve(new Response(
       'event: response.completed\ndata: {"type":"response.completed"}\n\n',
       { headers: { "Content-Type": "text/event-stream" } },
     ))) as typeof fetch;
 
     const recoveryKindsFor = async (
-      rotation: (next: ProviderAdapter) => ProviderAdapter | { adapter: ProviderAdapter; recoveryKind: AttemptRecoveryKind },
+      rotation: (next: ProviderAdapter) => { adapter: ProviderAdapter; recoveryKind: AttemptRecoveryKind },
     ): Promise<(AttemptRecoveryKind | undefined)[]> => {
       const sends: (AttemptRecoveryKind | undefined)[] = [];
       const buildRequest = (): AdapterRequest =>
@@ -1230,8 +1230,8 @@ describe("web-search sidecar native web_search_call emission", () => {
       .toEqual([undefined, "oauth-account-429"]);
     expect(await recoveryKindsFor(next => ({ adapter: next, recoveryKind: "anthropic-oauth-429" })))
       .toEqual([undefined, "anthropic-oauth-429"]);
-    // A bare adapter carries no kind, so the key-pool default stands.
-    expect(await recoveryKindsFor(next => next)).toEqual([undefined, "key-429"]);
+    expect(await recoveryKindsFor(next => ({ adapter: next, recoveryKind: "key-429" })))
+      .toEqual([undefined, "key-429"]);
   });
 
   test("retryOn429 replays on the same key before on429 rotation", async () => {
@@ -1482,7 +1482,7 @@ describe("web-search sidecar native web_search_call emission", () => {
       settings: { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
       maxSearches: 1,
       connectTimeoutMs: 100,
-      on429: () => rotatedAdapter,
+      on429: () => ({ adapter: rotatedAdapter, recoveryKind: "key-429" }),
     });
     expect(response.status).toBe(504);
     const body = await response.json() as { error?: { message?: string } };
