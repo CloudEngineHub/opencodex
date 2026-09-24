@@ -353,11 +353,14 @@ export function createSyntheticScratch(configDir?: string): ScratchTree {
     } finally {
       closeSync(fd);
     }
-    const trustedForCleanup = trusted;
+    // The pinned root is only needed to write the fixture; every later access
+    // opens its own trusted handle. Close it now so deferred cleanup — which
+    // may wait on a descendant-held pipe or never observe a release signal —
+    // cannot leak the descriptor (or hold the directory open on Windows).
+    closeTrustedScratchRoot(trusted);
     return {
       root,
       cleanup: () => {
-        closeTrustedScratchRoot(trustedForCleanup);
         try {
           rmSync(root, { recursive: true, force: true, maxRetries: 3 });
         } catch {
