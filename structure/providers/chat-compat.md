@@ -325,7 +325,13 @@ entry. `src/adapters/openai-chat/serialized-tool-call-content.ts` recognizes bar
 start of a line outside Markdown fences; inline, quoted and indented examples remain unchanged.
 It holds a possible serialized block, resumes ordinary text delivery when the header cannot match,
 and removes the block only when its function name and
-freeform body match a structured call's parsed `input` in the same response. If the gateway also prefixes the structured call's JSON
+freeform body match a structured call's parsed `input` in the same response.
+A block may close a freeform body with a stray `</parameter>` and may omit `</function>`, and one
+newline after the function header is template layout, so MiMo's echoes of those shapes match too
+(#5724). Blocks are read by delimiter scan in linear time: the first `</tool_call>` preceded by
+`</function>` closes the block, and only when none appears before the next block header at the start
+of a line does the first `</tool_call>` close it, so a body can still carry literal tool-call tags.
+If the gateway also prefixes the structured call's JSON
 arguments with the same freeform body, the adapter keeps the JSON suffix only when the block body,
 prefix, and wrapper's `input` value all agree. Mismatched markup and arguments remain byte-exact.
 Silent held-content frames emit adapter heartbeats. Terminal errors and transport read failures
@@ -339,6 +345,7 @@ matching and repair rules; regression coverage enters through `/v1/responses` in
 `tests/responses/responses-chat-tool-call-content.test.ts`.
 
 > Decision record: [ADR-5548](../decisions/ADR-5548-serialized-tool-call-content.md)
+> Decision record: [ADR-5724](../decisions/ADR-5724-serialized-tool-call-content.md)
 
 ## Kimi Coding Plan prompt-cache affinity
 

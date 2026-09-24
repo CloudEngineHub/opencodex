@@ -32,25 +32,69 @@ export interface StructuredToolCallReference {
   argumentsText: string;
 }
 
+const BLOCK_HEADER = /<tool_call>\s*<function=([^>\r\n]+)>/y;
+/** A separate bare block starts a line (see `splitAtPossibleSerializedToolCall`); a header mid-line is body text. */
+const NEXT_BLOCK_HEADER = /\n<tool_call>\s*<function=[^>\r\n]+>/g;
+const FUNCTION_CLOSE = "</function>";
+const PARAMETER_CLOSE = "</parameter>";
+
+function trimmedEnd(text: string, from: number, to: number): number {
+  while (to > from && /\s/.test(text[to - 1]!)) to--;
+  return to;
+}
+
+function endsWithAt(text: string, from: number, to: number, suffix: string): boolean {
+  return to - suffix.length >= from && text.startsWith(suffix, to - suffix.length);
+}
+
+/**
+ * The block starting at `offset`, read by delimiter scan so an unterminated block costs linear time.
+ * MiMo's echo may close a freeform body with a stray `</parameter>` and may omit `</function>`
+ * (#5724), the grammar the Command Code reader accepts too. The first `</tool_call>` preceded by
+ * `</function>` closes the block, so a body can still carry a literal `</tool_call>` or header;
+ * with none before the next line-start block header, the first `</tool_call>` does. That header only
+ * bounds an unclosed candidate: with no close at all before it, it is body text, and a closed
+ * `</function></tool_call>` after it still ends the block.
+ */
+function blockAt(text: string, offset: number): SerializedToolCall | undefined {
+  BLOCK_HEADER.lastIndex = offset;
+  const header = BLOCK_HEADER.exec(text);
+  if (!header) return undefined;
+  const bodyStart = offset + header[0].length;
+  NEXT_BLOCK_HEADER.lastIndex = bodyStart;
+  const next = NEXT_BLOCK_HEADER.exec(text);
+  const limit = next ? next.index + 1 : text.length;
+  let unclosed: SerializedToolCall | undefined;
+  for (let close = text.indexOf(CLOSE_TAG, bodyStart); close >= 0 && (close < limit || !unclosed);
+    close = text.indexOf(CLOSE_TAG, close + CLOSE_TAG.length)) {
+    let bodyEnd = trimmedEnd(text, bodyStart, close);
+    const closed = endsWithAt(text, bodyStart, bodyEnd, FUNCTION_CLOSE);
+    if (closed) bodyEnd = trimmedEnd(text, bodyStart, bodyEnd - FUNCTION_CLOSE.length);
+    if (endsWithAt(text, bodyStart, bodyEnd, PARAMETER_CLOSE)) bodyEnd -= PARAMETER_CLOSE.length;
+    const call = {
+      name: header[1]!.trim(),
+      body: text.slice(bodyStart, bodyEnd),
+      start: offset,
+      end: close + CLOSE_TAG.length,
+    };
+    if (closed) return call;
+    if (close < limit) unclosed ??= call;
+  }
+  return unclosed;
+}
+
 /** Finds complete bare blocks outside literal Markdown; ambiguous outer blocks stop the scan. */
 function callsIn(text: string, context: TextContext = { fence: null, lineStart: true }): SerializedToolCall[] {
-  const pattern = /<tool_call>\s*<function=([^>\r\n]+)>([\s\S]*?)(?:<\/parameter>)?\s*<\/function>\s*<\/tool_call>/y;
   const calls: SerializedToolCall[] = [];
   let offset = 0;
   while (offset < text.length) {
     const split = splitAtPossibleSerializedToolCall(text.slice(offset), context, true);
     offset += split.emit.length;
     if (!split.hasOpenTag) break;
-    pattern.lastIndex = offset;
-    const match = pattern.exec(text);
+    const match = blockAt(text, offset);
     if (!match) break; // An incomplete/ambiguous outer block cannot authorize an inner call.
-    calls.push({
-      name: match[1]!.trim(),
-      body: match[2]!,
-      start: match.index,
-      end: match.index + match[0].length,
-    });
-    offset = pattern.lastIndex;
+    calls.push(match);
+    offset = match.end;
     context = { fence: null, lineStart: false };
   }
   return calls;
@@ -279,6 +323,11 @@ function inputFromArguments(argumentsText: string): string | undefined {
   }
 }
 
+/** One wrapping newline after the function header is template layout, not input (vLLM `_trim_wrapping_newlines`). */
+function freeformBody(value: string): string {
+  return value.replace(/^\r?\n/, "").trimEnd();
+}
+
 /** The `[start, end)` ranges of blocks whose function identity and freeform input match a dispatched call. */
 function duplicatedSerializedToolCallRanges(
   text: string,
@@ -287,9 +336,11 @@ function duplicatedSerializedToolCallRanges(
 ): { start: number; end: number }[] {
   if (structuredCalls.length === 0) return [];
   return callsIn(text, context).filter(call => {
-    const body = call.body.trimEnd();
-    return structuredCalls.some(structured =>
-      structured.names.has(call.name) && inputFromArguments(structured.argumentsText)?.trimEnd() === body);
+    const body = freeformBody(call.body);
+    return structuredCalls.some(structured => {
+      const input = structured.names.has(call.name) ? inputFromArguments(structured.argumentsText) : undefined;
+      return input !== undefined && freeformBody(input) === body;
+    });
   });
 }
 
