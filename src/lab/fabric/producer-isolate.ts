@@ -19,6 +19,11 @@ const CHILD_ENTRY = join(dirname(fileURLToPath(import.meta.url)), "producer-chil
  * Bounded drain window between a child's `exit` and our decision. `close` also
  * waits for the child's stdio to end, and a descendant holding an inherited pipe
  * can delay it forever — so a missing `close` must not keep the run pending.
+ * The bound only has to cover an ordinary stdio flush after process death: the
+ * kernel releases a dead child's pipe ends immediately, so a `close` slower
+ * than this almost always means a descendant still holds a pipe. A slow-but-
+ * normal pipe that outlives the bound costs an inconclusive verdict plus
+ * deferred scratch cleanup — a bounded price that does not grow with the wait.
  */
 const EXIT_DRAIN_MS = 250;
 
@@ -367,26 +372,19 @@ export async function runIsolatedFabricProducer(request: IsolateRequest): Promis
           /* fall through */
         }
       }
-      // A stored result is accepted only when the child exited normally. A
-      // signaled or nonzero exit without a latched reason is a harness failure —
-      // parent-owned kills always carry a killReason, so this is never a timeout.
-      if (code !== 0 || signal) {
-        finish(() => reject(new FabricTaskError(
-          `isolated producer exited (${code ?? signal ?? "unknown"})`,
-          "harness_failure",
-          "harness",
-        )));
-        return;
-      }
       if (reaped) {
         // `close` never followed `exit`: the pipes outlived the producer, which
         // may mean a descendant escaped supervision — but the drain also cannot
         // rule out a stalled event loop or a slow pipe, so this is reported as
         // an inconclusive harness failure rather than a sandbox escape. Either
         // way the result is rejected: it must never resolve while a descendant
-        // might still be alive to mutate scratch after cleanup.
+        // might still be alive to mutate scratch after cleanup. The recorded
+        // exit status only narrows the message; the deferral contract is the
+        // same for a clean exit and a nonzero or signaled one.
         const failure = new FabricTaskError(
-          "isolated producer exited but its stdio never closed",
+          code !== 0 || signal
+            ? `isolated producer exited (${code ?? signal ?? "unknown"}); its stdio never closed`
+            : "isolated producer exited but its stdio never closed",
           "harness_failure",
           "harness",
         ) as FabricTaskError & { unconfirmedTermination?: boolean; stdioRelease?: Promise<void> };
@@ -396,6 +394,17 @@ export async function runIsolatedFabricProducer(request: IsolateRequest): Promis
         failure.unconfirmedTermination = true;
         failure.stdioRelease = stdioReleaseSignal;
         finish(() => reject(failure));
+        return;
+      }
+      // A stored result is accepted only when the child exited normally. A
+      // signaled or nonzero exit without a latched reason is a harness failure —
+      // parent-owned kills always carry a killReason, so this is never a timeout.
+      if (code !== 0 || signal) {
+        finish(() => reject(new FabricTaskError(
+          `isolated producer exited (${code ?? signal ?? "unknown"})`,
+          "harness_failure",
+          "harness",
+        )));
         return;
       }
       if (receivedResult) {

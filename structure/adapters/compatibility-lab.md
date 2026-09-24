@@ -150,6 +150,12 @@ data arrive; if `close` never follows, the run is rejected as an inconclusive
 harness failure — a held-open pipe may mean a descendant escaped supervision or
 simply that drainage stalled, so the result cannot be trusted and its scratch
 cannot be cleaned while reporting success under a possibly-live process.
+Rejections that could not observe `close` — a kill that produced neither `exit`
+nor `close`, and any `exit` whose `close` never arrived — carry the deferred-
+cleanup contract of an unconfirmed kill: the executor marks the scratch tree
+with `.ocx-deferred-cleanup` instead of removing it, removes it once every
+inherited pipe has closed, and the next task sweeps a marker older than the
+sweep age bound even if this process exits first.
 
 ## Scope guard
 

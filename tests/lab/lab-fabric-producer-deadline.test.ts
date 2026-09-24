@@ -517,7 +517,12 @@ describe("isolated fabric producer deadline admission", () => {
       h.child.exit(1);
       await h.pending();
       h.timers[2]!.callback();
-      await h.rejection("harness_failure", "harness", "isolated producer exited (1)");
+      await h.rejection("harness_failure", "harness", "isolated producer exited (1); its stdio never closed");
+      // The pipes outlived the producer here too, so the rejection carries
+      // the same deferred-cleanup contract as a clean exit without close.
+      const outcome = h.outcome();
+      if (outcome.status !== "rejected") throw new Error("producer did not reject after drain expiry");
+      expect(isUnconfirmedProducerTermination(outcome.error)).toBe(true);
     });
   });
 });
