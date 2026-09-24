@@ -10,7 +10,8 @@ import { listOpenAiForwardSidecarCandidates, resolveFirstUsableOpenAiSidecar } f
 import { handleResponses } from "../../src/server/responses/core";
 import { providerFetch } from "../../src/server/responses/fetch-helpers";
 import type { AdapterEvent, OcxConfig, OcxProviderConfig } from "../../src/types";
-import type { AdapterFetchContext, ProviderAdapter } from "../../src/adapters/base";
+import type { AdapterFetchContext, AdapterRequest, ProviderAdapter } from "../../src/adapters/base";
+import type { AttemptRecoveryKind } from "../../src/usage/log";
 import type { OcxMessage, OcxParsedRequest } from "../../src/types";
 import { fakeChatGptJwt } from "../helpers/fake-chatgpt-jwt";
 import { createTestTranslatorBudget } from "../helpers/translator-budget";
@@ -1171,6 +1172,66 @@ describe("web-search sidecar native web_search_call emission", () => {
         wireValue: "high",
       },
     ]);
+  });
+
+  // An account rotation and a key rotation are different operator-facing events, and the
+  // rotated fetch's recovery kind is the only place the attempt row records which happened.
+  // The loop used to hardcode `key-429` for both.
+  test("429 rotation reports the rotator's recovery kind, defaulting to key-429", async () => {
+    globalThis.fetch = (() => Promise.resolve(new Response(
+      'event: response.completed\ndata: {"type":"response.completed"}\n\n',
+      { headers: { "Content-Type": "text/event-stream" } },
+    ))) as typeof fetch;
+
+    const recoveryKindsFor = async (
+      rotation: (next: ProviderAdapter) => ProviderAdapter | { adapter: ProviderAdapter; recoveryKind: AttemptRecoveryKind },
+    ): Promise<(AttemptRecoveryKind | undefined)[]> => {
+      const sends: (AttemptRecoveryKind | undefined)[] = [];
+      const buildRequest = (): AdapterRequest =>
+        ({ url: "https://routed.test/v1", method: "POST", headers: {}, body: "{}" });
+      const firstAdapter: ProviderAdapter = {
+        name: "mock-429",
+        buildRequest,
+        fetchResponse: async () => new Response("rate limited", { status: 429, headers: { "retry-after": "30" } }),
+        async *parseStream() { /* unused */ },
+        async parseResponse() { return [{ type: "done" }] as AdapterEvent[]; },
+      };
+      const rotatedAdapter: ProviderAdapter = {
+        name: "mock-rotated",
+        buildRequest,
+        fetchResponse: async () => new Response("{}", { status: 200 }),
+        async *parseStream() {
+          yield { type: "text_delta", text: "answer from rotated account" };
+          yield { type: "done" };
+        },
+        async parseResponse() { throw new Error("parseResponse must be unreachable"); },
+      };
+      const response = await runWithWebSearch({
+        parsed: parseRequest({ model: "routed/model", input: "hi", stream: true, tools: [{ type: "web_search" }] }),
+        adapter: firstAdapter,
+        forwardProvider,
+        hostedTool: { type: "web_search" },
+        selectedForwardHeaders: new Headers({ authorization: "Bearer token" }),
+        settings: { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
+        maxSearches: 1,
+        onAttemptSend: recovery => { sends.push(recovery); },
+        on429: () => rotation(rotatedAdapter),
+      });
+      expect(response.status).toBe(200);
+      const frames = await collectSse(response.body!);
+      const completed = frames.find(f => f.event === "response.completed")?.data.response as Record<string, unknown>;
+      const output = completed.output as { type: string; content?: { text?: string }[] }[];
+      expect(output.find(o => o.type === "message")?.content?.[0]?.text).toBe("answer from rotated account");
+      return sends;
+    };
+
+    // A rotator that crossed accounts says so, and the rotated send carries that kind.
+    expect(await recoveryKindsFor(next => ({ adapter: next, recoveryKind: "oauth-account-429" })))
+      .toEqual([undefined, "oauth-account-429"]);
+    expect(await recoveryKindsFor(next => ({ adapter: next, recoveryKind: "anthropic-oauth-429" })))
+      .toEqual([undefined, "anthropic-oauth-429"]);
+    // A bare adapter carries no kind, so the key-pool default stands.
+    expect(await recoveryKindsFor(next => next)).toEqual([undefined, "key-429"]);
   });
 
   test("retryOn429 replays on the same key before on429 rotation", async () => {
