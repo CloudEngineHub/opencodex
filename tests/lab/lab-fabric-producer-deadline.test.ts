@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { setImmediate as nextTurn } from "node:timers";
 import { runIsolatedFabricProducer } from "../../src/lab/fabric/producer-isolate";
+import { isUnconfirmedProducerTermination } from "../../src/lab/fabric/producer-isolate";
 import type { IsolatedProducerResult } from "../../src/lab/fabric/producer-protocol";
 import { FabricTaskError, type FabricTaskRunResult, type SyntheticPatchV1 } from "../../src/lab/fabric/types";
 import { runFabricSyntheticPatchTaskForRoute } from "../../src/lab/fabric/executor";
@@ -90,6 +91,7 @@ type Harness = {
   at: (time: number) => void;
   result: (newline?: boolean) => void;
   pending: () => Promise<void>;
+  outcome: () => Outcome;
   failure: (...expected: ExpectedFailure) => Promise<void>;
   rejection: (...expected: ExpectedFailure) => Promise<void>;
   success: (lastActivityAt?: number) => Promise<void>;
@@ -135,6 +137,7 @@ async function withProducer(body: (h: Harness) => Promise<void>, totalTimeoutMs 
       child, timers, at: (value) => { time = value; },
       result: (newline = true) => { child.stdout.write(RESULT + (newline ? "\n" : "")); },
       pending: async () => { await drain(); expect(outcome.status).toBe("pending"); },
+      outcome: () => outcome,
       failure: async (...expected) => {
         child.close();
         await rejection(...expected);
@@ -195,7 +198,7 @@ describe("isolated fabric producer deadline admission", () => {
       h.at(1_101);
       h.child.stdout.write(ACTIVITY + RESULT + "\n");
       await h.pending();
-      expect(h.timers).toHaveLength(2);
+      expect(h.timers).toHaveLength(3);
       expect(h.child.signals).toEqual(["SIGKILL"]);
       await h.failure("inactivity_timeout");
     });
@@ -263,7 +266,7 @@ describe("isolated fabric producer deadline admission", () => {
         await h.pending();
         expect(h.child.signals).toEqual(["SIGKILL"]);
       }
-      expect(h.timers).toHaveLength(2);
+      expect(h.timers).toHaveLength(3);
       await h.failure("inactivity_timeout");
     });
   });
@@ -299,7 +302,7 @@ describe("isolated fabric producer deadline admission", () => {
         await h.pending();
         expect(h.child.signals).toEqual(["SIGKILL"]);
       }
-      expect(h.timers).toHaveLength(2);
+      expect(h.timers).toHaveLength(3);
       await h.failure("harness_failure", "harness", "first stderr read failure");
     });
   });
@@ -472,7 +475,30 @@ describe("isolated fabric producer deadline admission", () => {
       expect(h.child.signals).toEqual(["SIGKILL"]);
       h.child.exit(null, "SIGKILL");
       await h.pending();
+      // timers[2] is the kill-confirmation watchdog armed by settleTimeout;
+      // exit cleared it and armed the drain timer at index 3.
+      h.timers[3]!.callback();
+      await h.rejection("inactivity_timeout");
+    });
+  });
+
+  test("a kill that produces no exit or close still rejects within a bound", async () => {
+    await withProducer(async (h) => {
+      h.at(1_100);
+      h.timers[0]!.callback();
+      expect(h.child.signals).toEqual(["SIGKILL"]);
+      // SIGKILL answered by neither exit nor close (uninterruptible child or a
+      // failed kill): the latched reason must not pend forever. timers[2] is
+      // the kill-confirmation watchdog armed by settleTimeout.
       h.timers[2]!.callback();
+      await h.rejection("inactivity_timeout");
+      const outcome = h.outcome();
+      expect(outcome.status).toBe("rejected");
+      if (outcome.status === "rejected") {
+        expect(isUnconfirmedProducerTermination(outcome.error)).toBe(true);
+      }
+      // A close arriving after the bounded rejection is ignored.
+      h.child.close();
       await h.rejection("inactivity_timeout");
     });
   });

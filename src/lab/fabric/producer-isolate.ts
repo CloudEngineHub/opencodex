@@ -22,6 +22,13 @@ const CHILD_ENTRY = join(dirname(fileURLToPath(import.meta.url)), "producer-chil
  */
 const EXIT_DRAIN_MS = 250;
 
+/**
+ * Bounded wait for exit/close after a parent-owned SIGKILL. Neither event is
+ * guaranteed — a child in uninterruptible sleep, or a kill() that failed, produces
+ * neither — and a latched killReason must not leave the run pending forever.
+ */
+const KILL_CONFIRM_MS = 2_000;
+
 type FabricProducerIsolationLimits = {
   totalTimeoutMs: number;
   inactivityTimeoutMs: number;
@@ -87,6 +94,12 @@ function killChild(child: ChildProcess): void {
   }
 }
 
+/** Whether the producer rejected while its child might still be running. */
+export function isUnconfirmedProducerTermination(error: unknown): boolean {
+  return error instanceof FabricTaskError
+    && (error as FabricTaskError & { unconfirmedTermination?: boolean }).unconfirmedTermination === true;
+}
+
 /** Run a fabric patch producer in an isolated child process with parent-owned timeouts. */
 export async function runIsolatedFabricProducer(request: IsolateRequest): Promise<IsolatedProducerResult> {
   const now = request.now ?? (() => Date.now());
@@ -121,6 +134,7 @@ export async function runIsolatedFabricProducer(request: IsolateRequest): Promis
     let receivedResult: SyntheticPatchV1 | undefined;
     let killReason: FabricTaskError | undefined;
     let reapTimer: ReturnType<typeof setTimeout> | undefined;
+    let killWatchdog: ReturnType<typeof setTimeout> | undefined;
 
     const finish = (fn: () => void) => {
       // A latched failure owns settlement, but scratch cleanup must wait for close.
@@ -129,6 +143,7 @@ export async function runIsolatedFabricProducer(request: IsolateRequest): Promis
       clearTimeout(totalTimer);
       clearTimeout(inactivityTimer);
       if (reapTimer) clearTimeout(reapTimer);
+      if (killWatchdog) clearTimeout(killWatchdog);
       if (killReason) reject(killReason);
       else fn();
     };
@@ -137,7 +152,30 @@ export async function runIsolatedFabricProducer(request: IsolateRequest): Promis
       if (settled || killReason) return;
       killReason = error;
       if (childClosed) finish(() => reject(error));
-      else killChild(child);
+      else {
+        killChild(child);
+        // SIGKILL does not guarantee exit/close: an uninterruptible child, or a
+        // kill() that failed, emits neither, and the latched killReason would
+        // otherwise keep this run pending forever. Bound the wait; on expiry
+        // reject with the original reason flagged unconfirmed so the caller
+        // defers scratch cleanup instead of racing a child that may live.
+        killWatchdog = setTimeout(() => {
+          if (childClosed || settled) return;
+          settled = true;
+          clearTimeout(totalTimer);
+          clearTimeout(inactivityTimer);
+          if (reapTimer) clearTimeout(reapTimer);
+          if (killWatchdog) {
+            clearTimeout(killWatchdog);
+            killWatchdog = undefined;
+          }
+          try { child.stdout?.destroy(); } catch { /* already closed */ }
+          try { child.stderr?.destroy(); } catch { /* already closed */ }
+          try { child.unref(); } catch { /* fake children may lack unref */ }
+          (killReason! as FabricTaskError & { unconfirmedTermination?: boolean }).unconfirmedTermination = true;
+          reject(killReason);
+        }, KILL_CONFIRM_MS);
+      }
     };
 
     const expiredDeadline = (at: number): FabricTaskError | undefined => {
@@ -326,6 +364,12 @@ export async function runIsolatedFabricProducer(request: IsolateRequest): Promis
       }
       clearTimeout(totalTimer);
       clearTimeout(inactivityTimer);
+      // The direct child is confirmed dead, so the kill-confirmation watchdog
+      // is moot; only the stdio drain still needs its bound.
+      if (killWatchdog) {
+        clearTimeout(killWatchdog);
+        killWatchdog = undefined;
+      }
       // The direct child is dead, but `close` also waits for its stdio to end.
       // Bound the drain so a descendant holding an inherited pipe cannot keep
       // the run pending, then settle from the recorded exit status.
