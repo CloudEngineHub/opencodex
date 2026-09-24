@@ -9,8 +9,11 @@ import {
   readdirSync,
   readSync,
   rmSync,
+  statSync,
+  writeFileSync,
   writeSync,
   type Stats,
+  type Dirent,
 } from "node:fs";
 import { dirname, join, posix, relative, resolve, sep } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -28,6 +31,52 @@ interface TrustedScratchDir {
   path: string;
   fd: number;
   identity: string;
+}
+
+/** Marker left inside a scratch tree whose producer termination was unconfirmed. */
+const DEFERRED_SCRATCH_MARKER = ".ocx-deferred-cleanup";
+/**
+ * A marked tree is swept only once its marker is older than this bound: the
+ * marker alone is never proof the writer is gone, so the age margin must
+ * outlive any plausible uninterruptible descendant.
+ */
+const DEFERRED_SCRATCH_SWEEP_MIN_AGE_MS = 5 * 60_000;
+
+/** Mark a scratch tree for deferred cleanup by a later run or a stdio-release signal. */
+export function markScratchForDeferredCleanup(root: string): void {
+  try {
+    writeFileSync(join(root, DEFERRED_SCRATCH_MARKER), "");
+  } catch {
+    // best-effort: the in-process release signal may still clean the tree
+  }
+}
+
+/**
+ * Remove scratch trees marked for deferred cleanup whose marker is older than
+ * the bound. Runs at scratch creation so a tree survives process exit and is
+ * still collected by the next task; unmarked or recently marked trees — which
+ * may belong to a live producer — are never touched.
+ */
+export function sweepDeferredScratch(configDir?: string, minMarkerAgeMs = DEFERRED_SCRATCH_SWEEP_MIN_AGE_MS): void {
+  const base = labScratchDir(configDir);
+  let entries: Dirent[];
+  try {
+    entries = readdirSync(base, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  const now = Date.now();
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !entry.name.startsWith("fabric-")) continue;
+    const dir = join(base, entry.name);
+    try {
+      const stats = statSync(join(dir, DEFERRED_SCRATCH_MARKER));
+      if (now - stats.mtimeMs < minMarkerAgeMs) continue;
+      rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+    } catch {
+      // No marker (still confirmed-owned) or removal failed — leave the tree.
+    }
+  }
 }
 
 /** Require stats to describe a regular file, not a symlink or special node. */
@@ -275,6 +324,7 @@ export interface ScratchTree {
 /** Create an isolated scratch tree with the frozen synthetic-patch fixture file. */
 export function createSyntheticScratch(configDir?: string): ScratchTree {
   ensureLabDirs(configDir);
+  sweepDeferredScratch(configDir);
   const labBoundary = labRoot(configDir);
   const base = labScratchDir(configDir);
   ensureRestrictedDir(base, labBoundary);

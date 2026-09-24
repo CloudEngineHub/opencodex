@@ -18,9 +18,15 @@ import { applySyntheticPatch, parseSyntheticPatchV1 } from "./patch";
 import {
   fabricProducerIsolationLimits,
   isUnconfirmedProducerTermination,
+  producerTerminationSignal,
   runIsolatedFabricProducer,
 } from "./producer-isolate";
-import { assertNotUnderUserRepo, createSyntheticScratch, type ScratchTree } from "./scratch";
+import {
+  assertNotUnderUserRepo,
+  createSyntheticScratch,
+  markScratchForDeferredCleanup,
+  type ScratchTree,
+} from "./scratch";
 import {
   buildTaskSubjectV1,
   sandboxProfileDigest,
@@ -29,12 +35,6 @@ import {
   verifierManifestDigest,
 } from "./subject";
 
-/**
- * How long scratch deletion waits when the producer could not be confirmed dead.
- * Long enough for an uninterruptible child to be reaped by the OS; the timer is
- * unref'd so it never extends process lifetime for a scratch directory.
- */
-const DEFERRED_SCRATCH_CLEANUP_MS = 60_000;
 import type {
   FabricExecutionAuthority,
   FabricHarnessProducerKind,
@@ -197,6 +197,9 @@ async function runFabricSyntheticPatchTaskInternal(input: {
   // Rejected while the producer child might still be running: scratch must not
   // be removed under it, so cleanup is deferred instead of skipped forever.
   let producerTerminationUnconfirmed = false;
+  // Resolves when the last inherited stdio pipe closes — the durable signal
+  // that no descendant can still write inside the deferred scratch tree.
+  let deferredTermination: Promise<void> | undefined;
 
   try {
     scratch = createSyntheticScratch(input.configDir);
@@ -251,6 +254,7 @@ async function runFabricSyntheticPatchTaskInternal(input: {
       usage.elapsedMs = completedAt - startedAt;
       usage.inactiveMs = Math.max(0, completedAt - lastActivityAt);
       producerTerminationUnconfirmed = isUnconfirmedProducerTermination(error);
+      deferredTermination = producerTerminationSignal(error);
       if (error instanceof FabricTaskError) {
         const failure = failureFromError(error);
         return {
@@ -435,12 +439,15 @@ async function runFabricSyntheticPatchTaskInternal(input: {
   } finally {
     if (scratch) {
       if (producerTerminationUnconfirmed) {
-        // The producer may still be alive inside this tree; deleting it now
-        // would race its remaining writes. Defer cleanup far past the point
-        // a stuck child realistically stays unkillable, and unref so the
-        // pending timer never keeps the process alive for a scratch dir.
+        // The producer or a descendant holding its pipes may still be alive
+        // inside this tree; deleting it now would race their remaining writes.
+        // Mark the tree so the next task sweeps it even if this process exits
+        // first, and clean it as soon as the inherited stdio actually closes —
+        // the last writer releasing the pipes is the only confirmation that
+        // nothing can still use the tree.
         const tree = scratch;
-        setTimeout(() => tree.cleanup(), DEFERRED_SCRATCH_CLEANUP_MS).unref?.();
+        markScratchForDeferredCleanup(tree.root);
+        void deferredTermination?.then(() => tree.cleanup(), () => tree.cleanup());
       } else {
         scratch.cleanup();
       }

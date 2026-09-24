@@ -100,6 +100,18 @@ export function isUnconfirmedProducerTermination(error: unknown): boolean {
     && (error as FabricTaskError & { unconfirmedTermination?: boolean }).unconfirmedTermination === true;
 }
 
+/**
+ * The release signal attached to an unconfirmed-termination rejection: resolves
+ * once every still-open inherited stdio pipe reports its natural close, meaning
+ * no descendant can still hold scratch open. Undefined when nothing monitorable
+ * remained — callers must then rely on the deferred-cleanup sweep.
+ */
+export function producerTerminationSignal(error: unknown): Promise<void> | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  const signal = (error as { stdioRelease?: unknown }).stdioRelease;
+  return signal instanceof Promise ? signal : undefined;
+}
+
 /** Run a fabric patch producer in an isolated child process with parent-owned timeouts. */
 export async function runIsolatedFabricProducer(request: IsolateRequest): Promise<IsolatedProducerResult> {
   const now = request.now ?? (() => Date.now());
@@ -135,6 +147,32 @@ export async function runIsolatedFabricProducer(request: IsolateRequest): Promis
     let killReason: FabricTaskError | undefined;
     let reapTimer: ReturnType<typeof setTimeout> | undefined;
     let killWatchdog: ReturnType<typeof setTimeout> | undefined;
+    // Resolves once every still-open inherited stdio pipe reports its natural
+    // close — the only durable signal that no descendant can still write
+    // scratch. Undefined when no open pipe can be monitored.
+    let stdioReleaseSignal: Promise<void> | undefined;
+
+    // Keep monitorable pipes open but unref'd so they never extend process
+    // lifetime; a stream without unref() is destroyed instead, and its
+    // self-inflicted close must not count toward the release signal.
+    const armStdioRelease = (): void => {
+      const waiters: Promise<void>[] = [];
+      let unmonitorable = false;
+      for (const stream of [child.stdout, child.stderr]) {
+        if (!stream || stream.destroyed) continue;
+        const unref = (stream as unknown as { unref?: unknown }).unref;
+        if (typeof unref === "function") {
+          waiters.push(new Promise<void>((resolve) => stream.once("close", resolve)));
+          unref.call(stream);
+        } else {
+          unmonitorable = true;
+          try { stream.destroy(); } catch { /* already closed */ }
+        }
+      }
+      if (waiters.length > 0 && !unmonitorable) {
+        stdioReleaseSignal = Promise.all(waiters).then(() => undefined);
+      }
+    };
 
     const finish = (fn: () => void) => {
       // A latched failure owns settlement, but scratch cleanup must wait for close.
@@ -169,10 +207,11 @@ export async function runIsolatedFabricProducer(request: IsolateRequest): Promis
             clearTimeout(killWatchdog);
             killWatchdog = undefined;
           }
-          try { child.stdout?.destroy(); } catch { /* already closed */ }
-          try { child.stderr?.destroy(); } catch { /* already closed */ }
+          armStdioRelease();
           try { child.unref(); } catch { /* fake children may lack unref */ }
-          (killReason! as FabricTaskError & { unconfirmedTermination?: boolean }).unconfirmedTermination = true;
+          const reason = killReason! as FabricTaskError & { unconfirmedTermination?: boolean; stdioRelease?: Promise<void> };
+          reason.unconfirmedTermination = true;
+          reason.stdioRelease = stdioReleaseSignal;
           reject(killReason);
         }, KILL_CONFIRM_MS);
       }
@@ -309,7 +348,15 @@ export async function runIsolatedFabricProducer(request: IsolateRequest): Promis
     const decide = (code: number | null, signal: NodeJS.Signals | null, reaped = false) => {
       if (settled) return;
       if (killReason) {
-        finish(() => reject(killReason!));
+        const reason = killReason as FabricTaskError & { unconfirmedTermination?: boolean; stdioRelease?: Promise<void> };
+        if (reaped) {
+          // The kill was answered by exit but the pipes stayed open: a
+          // descendant can still hold them, so scratch cleanup must defer to
+          // the same release contract as an unconfirmed kill.
+          reason.unconfirmedTermination = true;
+          reason.stdioRelease = stdioReleaseSignal;
+        }
+        finish(() => reject(reason));
         return;
       }
       if (stdoutBuffer.trim()) {
@@ -338,11 +385,17 @@ export async function runIsolatedFabricProducer(request: IsolateRequest): Promis
         // an inconclusive harness failure rather than a sandbox escape. Either
         // way the result is rejected: it must never resolve while a descendant
         // might still be alive to mutate scratch after cleanup.
-        finish(() => reject(new FabricTaskError(
+        const failure = new FabricTaskError(
           "isolated producer exited but its stdio never closed",
           "harness_failure",
           "harness",
-        )));
+        ) as FabricTaskError & { unconfirmedTermination?: boolean; stdioRelease?: Promise<void> };
+        // A descendant holding an inherited pipe can still use scratch after
+        // the direct child exited, so the caller must defer cleanup until the
+        // pipes actually close — same contract as an unconfirmed kill.
+        failure.unconfirmedTermination = true;
+        failure.stdioRelease = stdioReleaseSignal;
+        finish(() => reject(failure));
         return;
       }
       if (receivedResult) {
@@ -380,8 +433,7 @@ export async function runIsolatedFabricProducer(request: IsolateRequest): Promis
         }
         if (childClosed || settled) return;
         childClosed = true;
-        try { child.stdout?.destroy(); } catch { /* already closed */ }
-        try { child.stderr?.destroy(); } catch { /* already closed */ }
+        armStdioRelease();
         decide(code, signal, true);
       }, EXIT_DRAIN_MS);
     });

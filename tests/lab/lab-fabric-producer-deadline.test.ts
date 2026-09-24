@@ -11,6 +11,7 @@ import { isUnconfirmedProducerTermination } from "../../src/lab/fabric/producer-
 import type { IsolatedProducerResult } from "../../src/lab/fabric/producer-protocol";
 import { FabricTaskError, type FabricTaskRunResult, type SyntheticPatchV1 } from "../../src/lab/fabric/types";
 import { runFabricSyntheticPatchTaskForRoute } from "../../src/lab/fabric/executor";
+import { sweepDeferredScratch } from "../../src/lab/fabric/scratch";
 import { createLabDestination } from "../../src/lab/live/destination";
 import { fabricCorrectPatchExecutor, fabricMockRoute } from "../helpers/fabric-task-test";
 
@@ -420,6 +421,12 @@ describe("isolated fabric producer deadline admission", () => {
       h.timers[2]!.callback();
       // The pipes outlived the producer — inconclusive, never a trusted result.
       await h.rejection("harness_failure", "harness", "isolated producer exited but its stdio never closed");
+      // A descendant may still hold the inherited pipes — and scratch — so the
+      // rejection must carry the same deferred-cleanup contract as an
+      // unconfirmed kill, not let the executor remove scratch immediately.
+      const outcome = h.outcome();
+      if (outcome.status !== "rejected") throw new Error("producer did not reject after drain expiry");
+      expect(isUnconfirmedProducerTermination(outcome.error)).toBe(true);
       expect(h.child.stdout.destroyed).toBe(true);
       expect(h.child.stderr.destroyed).toBe(true);
       // A close arriving after the decision is ignored.
@@ -587,6 +594,79 @@ test("trusted route keeps scratch until stderr-failed child closes, then cleans 
     expect(existsSync(scratchRoot)).toBe(false);
     expect(timers.every(({ cleared }) => cleared)).toBe(true);
     expect(spawnSpy).toHaveBeenCalledTimes(1);
+  } finally {
+    try {
+      child.close();
+      await drain();
+      child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy();
+    } finally {
+      for (const restore of restorers.reverse()) restore();
+      for (const [name, value] of proxyEnv) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+      rmSync(configDir, { recursive: true, force: true });
+      expect(childProcess.spawn).toBe(originals.spawn);
+      expect(globalThis.setTimeout).toBe(originals.set);
+      expect(globalThis.clearTimeout).toBe(originals.clear);
+    }
+  }
+});
+
+test("trusted route defers scratch when exit arrives but close never does", async () => {
+  const configDir = mkdtempSync(join(tmpdir(), "ocx-fabric-consumer-defer-"));
+  const child = new DeadlineChild();
+  const originals = { spawn: childProcess.spawn, set: globalThis.setTimeout, clear: globalThis.clearTimeout };
+  const restorers: Array<() => void> = [];
+  const proxyNames = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"];
+  const proxyEnv = proxyNames.map((name) => [name, process.env[name]] as const);
+  const outer: { outcome: Outcome<FabricTaskRunResult> } = { outcome: { status: "pending" } };
+  try {
+    for (const name of proxyNames) delete process.env[name];
+    const destination = await createLabDestination({
+      baseUrl: "https://api.example.com/v1", labRunApproval: true, configDir,
+      resolve: async () => [{ address: "93.184.216.34", family: 4 }],
+    });
+    const spawnSpy = spyOn(childProcess, "spawn").mockImplementation(() => child as unknown as childProcess.ChildProcess);
+    restorers.push(() => spawnSpy.mockRestore());
+    const timers = installTimers(restorers);
+    void runFabricSyntheticPatchTaskForRoute({
+      routeContext: fabricMockRoute(), destination, configDir, now: () => START,
+      patchExecutor: fabricCorrectPatchExecutor(),
+    }).then(
+      (value) => { outer.outcome = { status: "resolved", value }; },
+      (error: unknown) => { outer.outcome = { status: "rejected", error }; },
+    );
+    const scratchRoot = spawnSpy.mock.calls[0]?.[2]?.env?.OCX_FABRIC_SCRATCH_ROOT;
+    expect(typeof scratchRoot).toBe("string");
+    if (!scratchRoot) throw new Error("producer spawn omitted its scratch root");
+    expect(existsSync(scratchRoot)).toBe(true);
+    await drain();
+
+    // The producer exits cleanly but a descendant keeps the inherited pipes
+    // open, so close never arrives and the drain bound expires.
+    child.exit(0);
+    await drain();
+    timers[2]!.callback();
+    await drain();
+    expect(outer.outcome.status).toBe("resolved");
+    if (outer.outcome.status !== "resolved") throw new Error("route did not settle after drain expiry");
+    expect(outer.outcome.value).toMatchObject({
+      outcome: {
+        outcome: "inconclusive",
+        failure: { class: "harness_failure", code: "harness_failure", attribution: "harness" },
+      },
+    });
+
+    // Termination is unconfirmed: scratch must survive removal while a
+    // descendant could still write it, marked so a later run sweeps it even
+    // if this process exits first.
+    expect(existsSync(scratchRoot)).toBe(true);
+    expect(existsSync(join(scratchRoot, ".ocx-deferred-cleanup"))).toBe(true);
+
+    // The next task's sweep removes the marked tree once its marker ages out.
+    sweepDeferredScratch(configDir, 0);
+    expect(existsSync(scratchRoot)).toBe(false);
   } finally {
     try {
       child.close();
