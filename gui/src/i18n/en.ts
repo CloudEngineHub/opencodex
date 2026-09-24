@@ -368,6 +368,8 @@ export const en = {
   "dash.visionModelHint": "Model used to describe images for text-only routed models. Requires ChatGPT login.",
   "dash.webSearchSidecar": "Web search sidecar",
   "dash.webSearchSidecarHint": "Choose the backend and model used for web search on routed models.",
+  "dash.webSearchOff": "Off",
+  "dash.webSearchCodexSync": "Saved. Codex's config was not rewritten — run Sync models to apply it.",
   "dash.webSearchStream": "Stream answers live",
   "dash.webSearchStreamHint": "Stream the model’s leading text and reasoning live until it decides on a tool call; the rest of the turn stays buffered for search interception. Text written before a search may partially repeat.",
   "dash.visionSidecar": "Vision sidecar",
@@ -3211,6 +3213,14 @@ export const en = {
   "remote.event.status": "Status",
   "remote.event.tool": "Remote tool",
   "remote.event.error": "Error",
+  "quotaSummary.aria": "Provider quota summary",
+  "quotaSummary.updated": "Updated {time}",
+  "quotaSummary.dataAt": "Data from {time}",
+  "quotaSummary.observedAt": "Observed at {time}",
+  "quotaSummary.warn": "70%+ used",
+  "quotaSummary.critical": "90%+ used",
+  "quotaSummary.credits": "Credits",
+  "quotaSummary.refreshFailed": "Last refresh failed; showing the previous reading",
 } as const;
 
 export type TKey = keyof typeof en;
