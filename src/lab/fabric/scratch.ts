@@ -71,7 +71,11 @@ export function sweepDeferredScratch(configDir?: string, minMarkerAgeMs = DEFERR
     const dir = join(base, entry.name);
     try {
       const stats = statSync(join(dir, DEFERRED_SCRATCH_MARKER));
-      if (now - stats.mtimeMs < minMarkerAgeMs) continue;
+      // A non-positive bound means "sweep regardless of age". Comparing without
+      // this guard is not equivalent: marker mtimeMs keeps sub-millisecond
+      // precision while Date.now() truncates, so a marker written in the same
+      // millisecond can read as slightly future-dated and be skipped.
+      if (minMarkerAgeMs > 0 && now - stats.mtimeMs < minMarkerAgeMs) continue;
       rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
     } catch {
       // No marker (still confirmed-owned) or removal failed — leave the tree.
