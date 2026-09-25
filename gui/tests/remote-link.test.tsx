@@ -29,6 +29,12 @@ afterEach(async () => {
 
 function response(body: unknown, status = 200): Response { return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } }); }
 async function flush(): Promise<void> { await act(async () => { await Promise.resolve(); await Promise.resolve(); }); }
+function declareRuntimeRole(role: "standalone" | "hub" | "client"): void {
+  const meta = win.document.createElement("meta");
+  meta.name = "opencodex-runtime-role";
+  meta.content = role;
+  win.document.head.append(meta);
+}
 async function mount(props: Partial<React.ComponentProps<typeof RemoteLink>> = {}): Promise<HTMLDivElement> {
   const host = win.document.createElement("div");
   win.document.body.append(host);
@@ -70,8 +76,140 @@ test("off state and role choice issue no mutation request", async () => {
   expect(host.textContent).toContain("Choose this computer's role");
   await act(async () => { (host.querySelector('[role="radio"][aria-checked="false"]') as HTMLButtonElement).click(); });
   await flush();
-  expect(host.textContent).toContain("Child setup is available");
+  expect(host.textContent).toContain("Child links can only be started from a standalone runtime.");
   expect(calls.every(call => call.method === "GET")).toBe(true);
+});
+
+test("Child role is disabled unless the served runtime is standalone", async () => {
+  globalThis.fetch = (async () => response({ ...baseStatus, role: "home" })) as typeof fetch;
+  const host = await mount();
+  await act(async () => { (host.querySelector('[role="switch"]') as HTMLButtonElement).click(); });
+  const child = [...host.querySelectorAll('[role="radio"]')][1] as HTMLButtonElement;
+  expect(child.getAttribute("aria-disabled")).toBe("true");
+  await act(async () => { child.click(); });
+  expect((host.querySelector(".remote-link-sheet") as HTMLDialogElement | null)?.open ?? false).toBe(false);
+  await act(async () => { root?.unmount(); });
+  root = null;
+
+  declareRuntimeRole("standalone");
+  const standaloneHost = await mount();
+  await act(async () => { (standaloneHost.querySelector('[role="switch"]') as HTMLButtonElement).click(); });
+  const standaloneChild = [...standaloneHost.querySelectorAll('[role="radio"]')][1] as HTMLButtonElement;
+  expect(standaloneChild.getAttribute("aria-disabled")).toBe("false");
+});
+
+test("standalone Child flow joins with exactly the confirmed alias and shows restart waiting", async () => {
+  declareRuntimeRole("standalone");
+  const calls: Array<{ path: string; method: string; body?: string }> = [];
+  globalThis.fetch = (async (input, init) => {
+    const path = new URL(String(input)).pathname;
+    calls.push({ path, method: init?.method ?? "GET", body: typeof init?.body === "string" ? init.body : undefined });
+    if (path === "/api/link/candidates") return response({ candidates: [{ alias: "home-one", source: "ssh_config" }] });
+    if (path === "/api/link/probe") return response({ alias: "home-one", fingerprint: "SHA256:test", keyType: "ed25519" });
+    if (path === "/api/link/confirm-host") return response({ alias: "home-one", fingerprint: "SHA256:test", ocxVersion: "2.0.0" });
+    if (path === "/api/link/join") return response({ linkId: "lnk_1234567890abcdef", alias: "home-one", restarting: true }, 202);
+    return response({ ...baseStatus, role: "standalone" });
+  }) as typeof fetch;
+  const host = await mount();
+  await act(async () => { (host.querySelector('[role="switch"]') as HTMLButtonElement).click(); });
+  await act(async () => { ([...host.querySelectorAll('[role="radio"]')][1] as HTMLButtonElement).click(); });
+  await flush();
+  await act(async () => { (host.querySelector(".remote-link-candidate") as HTMLButtonElement).click(); });
+  await act(async () => { [...host.querySelectorAll("button")].find(button => button.textContent?.includes("Test connection"))?.click(); });
+  await flush();
+  await act(async () => { (host.querySelector('input[type="checkbox"]') as HTMLInputElement).click(); });
+  await act(async () => { [...host.querySelectorAll("button")].find(button => button.textContent?.includes("Confirm host"))?.click(); });
+  await flush();
+  await act(async () => { [...host.querySelectorAll("button")].find(button => button.textContent?.includes("Connect as Child"))?.click(); });
+  await flush();
+  expect(calls.find(call => call.path === "/api/link/join")?.body).toBe(JSON.stringify({ alias: "home-one" }));
+  expect(calls.some(call => call.path === "/api/link/apply")).toBe(false);
+  expect(host.textContent).toContain("This computer will restart to connect as a Child.");
+  expect(host.textContent).toContain("Waiting for this computer to reconnect as Child");
+});
+
+test("join failure maps actionable errors and Retry re-joins the confirmed alias", async () => {
+  declareRuntimeRole("standalone");
+  let joins = 0;
+  globalThis.fetch = (async input => {
+    const path = new URL(String(input)).pathname;
+    if (path === "/api/link/candidates") return response({ candidates: [{ alias: "home-one", source: "ssh_config" }] });
+    if (path === "/api/link/probe") return response({ alias: "home-one", fingerprint: "SHA256:test", keyType: "ed25519" });
+    if (path === "/api/link/confirm-host") return response({ alias: "home-one", fingerprint: "SHA256:test", ocxVersion: "2.0.0" });
+    if (path === "/api/link/join") {
+      joins += 1;
+      return joins === 1 ? response({ error: { code: "join_tunnel_failed" } }, 502) : response({ linkId: "lnk_1234567890abcdef", alias: "home-one", restarting: true }, 202);
+    }
+    return response({ ...baseStatus, role: "standalone" });
+  }) as typeof fetch;
+  const host = await mount();
+  await act(async () => { (host.querySelector('[role="switch"]') as HTMLButtonElement).click(); });
+  await act(async () => { ([...host.querySelectorAll('[role="radio"]')][1] as HTMLButtonElement).click(); });
+  await flush();
+  await act(async () => { (host.querySelector(".remote-link-candidate") as HTMLButtonElement).click(); });
+  await act(async () => { [...host.querySelectorAll("button")].find(button => button.textContent?.includes("Test connection"))?.click(); });
+  await flush();
+  await act(async () => { (host.querySelector('input[type="checkbox"]') as HTMLInputElement).click(); });
+  await act(async () => { [...host.querySelectorAll("button")].find(button => button.textContent?.includes("Confirm host"))?.click(); });
+  await flush();
+  await act(async () => { [...host.querySelectorAll("button")].find(button => button.textContent?.includes("Connect as Child"))?.click(); });
+  await flush();
+  expect(host.textContent).toContain("The tunnel to Home could not be started.");
+  await act(async () => { [...host.querySelectorAll("button")].find(button => button.textContent?.includes("Retry"))?.click(); });
+  await flush();
+  expect(joins).toBe(2);
+  expect(host.textContent).toContain("This computer will restart to connect as a Child.");
+});
+
+test("join maps standalone_required to an actionable message", async () => {
+  declareRuntimeRole("standalone");
+  globalThis.fetch = (async input => {
+    const path = new URL(String(input)).pathname;
+    if (path === "/api/link/candidates") return response({ candidates: [{ alias: "home-one", source: "ssh_config" }] });
+    if (path === "/api/link/probe") return response({ alias: "home-one", fingerprint: "SHA256:test", keyType: "ed25519" });
+    if (path === "/api/link/confirm-host") return response({ alias: "home-one", fingerprint: "SHA256:test", ocxVersion: "2.0.0" });
+    if (path === "/api/link/join") return response({ error: { code: "standalone_required" } }, 409);
+    return response({ ...baseStatus, role: "standalone" });
+  }) as typeof fetch;
+  const host = await mount();
+  await act(async () => { (host.querySelector('[role="switch"]') as HTMLButtonElement).click(); });
+  await act(async () => { ([...host.querySelectorAll('[role="radio"]')][1] as HTMLButtonElement).click(); });
+  await flush();
+  await act(async () => { (host.querySelector(".remote-link-candidate") as HTMLButtonElement).click(); });
+  await act(async () => { [...host.querySelectorAll("button")].find(button => button.textContent?.includes("Test connection"))?.click(); });
+  await flush();
+  await act(async () => { (host.querySelector('input[type="checkbox"]') as HTMLInputElement).click(); });
+  await act(async () => { [...host.querySelectorAll("button")].find(button => button.textContent?.includes("Confirm host"))?.click(); });
+  await flush();
+  await act(async () => { [...host.querySelectorAll("button")].find(button => button.textContent?.includes("Connect as Child"))?.click(); });
+  await flush();
+  expect(host.textContent).toContain("Child links can only be started from a standalone runtime.");
+});
+
+test("join_restart_failed shows restart guidance without Retry", async () => {
+  declareRuntimeRole("standalone");
+  globalThis.fetch = (async input => {
+    const path = new URL(String(input)).pathname;
+    if (path === "/api/link/candidates") return response({ candidates: [{ alias: "home-one", source: "ssh_config" }] });
+    if (path === "/api/link/probe") return response({ alias: "home-one", fingerprint: "SHA256:test", keyType: "ed25519" });
+    if (path === "/api/link/confirm-host") return response({ alias: "home-one", fingerprint: "SHA256:test", ocxVersion: "2.0.0" });
+    if (path === "/api/link/join") return response({ error: { code: "join_restart_failed" } }, 500);
+    return response({ ...baseStatus, role: "standalone" });
+  }) as typeof fetch;
+  const host = await mount();
+  await act(async () => { (host.querySelector('[role="switch"]') as HTMLButtonElement).click(); });
+  await act(async () => { ([...host.querySelectorAll('[role="radio"]')][1] as HTMLButtonElement).click(); });
+  await flush();
+  await act(async () => { (host.querySelector(".remote-link-candidate") as HTMLButtonElement).click(); });
+  await act(async () => { [...host.querySelectorAll("button")].find(button => button.textContent?.includes("Test connection"))?.click(); });
+  await flush();
+  await act(async () => { (host.querySelector('input[type="checkbox"]') as HTMLInputElement).click(); });
+  await act(async () => { [...host.querySelectorAll("button")].find(button => button.textContent?.includes("Confirm host"))?.click(); });
+  await flush();
+  await act(async () => { [...host.querySelectorAll("button")].find(button => button.textContent?.includes("Connect as Child"))?.click(); });
+  await flush();
+  expect(host.textContent).toContain("The link is ready. Restart OpenCodex on this computer to finish connecting as a Child.");
+  expect(host.textContent).not.toContain("Retry");
 });
 
 test("workspace card is available only through the availability prop", async () => {
@@ -175,6 +313,7 @@ test("apply failure stays retryable and Retry reapplies the confirmed alias", as
 });
 
 test("role radios use roving tabIndex and arrow, Home, and End keys", async () => {
+  declareRuntimeRole("standalone");
   globalThis.fetch = (async () => response(baseStatus)) as typeof fetch;
   const host = await mount();
   await act(async () => { (host.querySelector('[role="switch"]') as HTMLButtonElement).click(); });
@@ -273,4 +412,59 @@ test("cancelling a failed apply leaves no dead Retry behind", async () => {
   await flush();
   expect([...host.querySelectorAll("button")].some(button => button.textContent === "Retry")).toBe(false);
   expect([...host.querySelectorAll("button")].some(button => button.textContent?.includes("Add child"))).toBe(true);
+});
+
+test("cancelling a join ignores a late failure", async () => {
+  declareRuntimeRole("standalone");
+  let releaseJoin!: (value: Response) => void;
+  const joinResponse = new Promise<Response>(resolve => { releaseJoin = resolve; });
+  globalThis.fetch = (async input => {
+    const path = new URL(String(input)).pathname;
+    if (path === "/api/link/candidates") return response({ candidates: [{ alias: "home-one", source: "ssh_config" }] });
+    if (path === "/api/link/probe") return response({ alias: "home-one", fingerprint: "SHA256:test", keyType: "ed25519" });
+    if (path === "/api/link/confirm-host") return response({ alias: "home-one", fingerprint: "SHA256:test", ocxVersion: "2.0.0" });
+    if (path === "/api/link/join") return joinResponse;
+    return response({ ...baseStatus, role: "standalone" });
+  }) as typeof fetch;
+  const host = await mount();
+  await act(async () => { (host.querySelector('[role="switch"]') as HTMLButtonElement).click(); });
+  await act(async () => { ([...host.querySelectorAll('[role="radio"]')][1] as HTMLButtonElement).click(); });
+  await flush();
+  await act(async () => { (host.querySelector(".remote-link-candidate") as HTMLButtonElement).click(); });
+  await act(async () => { [...host.querySelectorAll("button")].find(button => button.textContent?.includes("Test connection"))?.click(); });
+  await flush();
+  await act(async () => { (host.querySelector('input[type="checkbox"]') as HTMLInputElement).click(); });
+  await act(async () => { [...host.querySelectorAll("button")].find(button => button.textContent?.includes("Confirm host"))?.click(); });
+  await flush();
+  await act(async () => { [...host.querySelectorAll("button")].find(button => button.textContent?.includes("Connect as Child"))?.click(); });
+  await act(async () => { [...host.querySelectorAll("button")].find(button => button.textContent === "Cancel")?.click(); });
+  releaseJoin(response({ error: { code: "join_tunnel_failed" } }, 502));
+  await flush();
+  expect(host.textContent).not.toContain("Retry");
+  expect(host.textContent).not.toContain("The tunnel to Home could not be started.");
+});
+
+test("cancelling candidates prevents a late response from appearing in a new attempt", async () => {
+  let releaseFirst!: (value: Response) => void;
+  let candidateCalls = 0;
+  const firstCandidates = new Promise<Response>(resolve => { releaseFirst = resolve; });
+  globalThis.fetch = (async input => {
+    const path = new URL(String(input)).pathname;
+    if (path === "/api/link/candidates") {
+      candidateCalls += 1;
+      return candidateCalls === 1 ? firstCandidates : response({ candidates: [{ alias: "new-home", source: "ssh_config" }] });
+    }
+    return response(baseStatus);
+  }) as typeof fetch;
+  const host = await mount();
+  await act(async () => { (host.querySelector('[role="switch"]') as HTMLButtonElement).click(); });
+  await act(async () => { (host.querySelector(".btn-primary") as HTMLButtonElement).click(); });
+  await act(async () => { [...host.querySelectorAll("button")].find(button => button.textContent?.includes("Add child"))?.click(); });
+  await act(async () => { [...host.querySelectorAll("button")].find(button => button.textContent === "Cancel")?.click(); });
+  await act(async () => { [...host.querySelectorAll("button")].find(button => button.textContent?.includes("Add child"))?.click(); });
+  await flush();
+  releaseFirst(response({ candidates: [{ alias: "stale-home", source: "ssh_config" }] }));
+  await flush();
+  expect(host.textContent).toContain("new-home");
+  expect(host.textContent).not.toContain("stale-home");
 });
