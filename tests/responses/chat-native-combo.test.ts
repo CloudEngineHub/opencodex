@@ -207,6 +207,29 @@ describe("native Chat candidates in a combo", () => {
     });
   });
 
+  test("Chat reasoning intent survives an empty-ladder first target and reaches failover", async () => {
+    const a = upstream(() => Response.json({ error: { message: "fixture outage" } }, { status: 503 }));
+    const b = upstream(() => responsesStream("reasoned fallback"));
+    const config = comboConfig(
+      {
+        a: provider("openai-responses", a.baseUrl, { reasoningEfforts: [] }),
+        b: provider("openai-responses", b.baseUrl, { reasoningEfforts: ["low", "high"] }),
+      },
+      [{ provider: "a", model: "m1" }, { provider: "b", model: "m2" }],
+    );
+
+    const { response, text } = await send(config, { stream: false, reasoning_effort: "high" });
+
+    expect(response.status).toBe(200);
+    expect(text).toContain("reasoned fallback");
+    expect(a.bodies).toHaveLength(3);
+    for (const body of a.bodies) {
+      expect((body.reasoning as Rec | undefined)?.effort).toBeUndefined();
+    }
+    expect(b.bodies).toHaveLength(1);
+    expect((b.bodies[0]!.reasoning as Rec | undefined)?.effort).toBe("high");
+  });
+
   test("a streamed native answer that fails after output is not re-sent to the next target", async () => {
     const a = upstream(() => chatErrorStream("fixture broke mid-stream", "partial answer"));
     const b = upstream(() => responsesStream("must not run"));
