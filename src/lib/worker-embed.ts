@@ -11,7 +11,7 @@
  * checkouts. Source checkouts without generated bundles fall back to the
  * dev-mode URL form.
  */
-import { WORKER_BUNDLES } from "./generated/worker-bundles.gen";
+import { WORKER_BUNDLES } from "../generated/worker-bundles.gen";
 
 export function spawnWorker(devUrl: string, key: string): Worker {
   const src = WORKER_BUNDLES[key];

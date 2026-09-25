@@ -9,7 +9,7 @@
  * `storage_mutation_busy` (409) instead of queueing.
  */
 import { resolveCodexHomeDir } from "../codex/home";
-import { spawnWorker } from "../worker-embed";
+import { spawnWorker } from "../lib/worker-embed";
 import { restoreTrashEntry, type RestoreResult, type RestoreTestHooks } from "./cleanup";
 import {
   resetStorageMutationCoordinatorForTests,

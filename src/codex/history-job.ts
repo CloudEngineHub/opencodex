@@ -24,7 +24,7 @@ import type {
   HistoryWorkerResult,
 } from "./history-worker";
 import { currentHistoryDbBusyTimeoutMs, resolveExistingHistoryBackupPath } from "./history-provider";
-import { spawnWorker } from "../worker-embed";
+import { spawnWorker } from "../lib/worker-embed";
 import type { CodexHistoryFailureReason, CodexHistoryVerifiedNoopProof } from "./history-provider";
 import { getCodexHome, resolveCodexStateDbPath } from "./paths";
 

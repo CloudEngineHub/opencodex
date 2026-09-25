@@ -6,7 +6,7 @@
  * proxy event loop stays responsive.
  */
 import type { CleanupMode, CleanupResult } from "./cleanup";
-import { spawnWorker } from "../worker-embed";
+import { spawnWorker } from "../lib/worker-embed";
 import { resolveCodexHomeDir } from "../codex/home";
 import {
   tryBeginStorageMutation,

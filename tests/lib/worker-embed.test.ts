@@ -15,8 +15,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { WORKER_BUNDLES } from "../src/generated/worker-bundles.gen";
-import { spawnWorker } from "../src/worker-embed";
+import { WORKER_BUNDLES } from "../../src/generated/worker-bundles.gen";
+import { spawnWorker } from "../../src/lib/worker-embed";
 
 function nextMessage(worker: Worker, timeoutMs = 5000): Promise<unknown> {
   return new Promise((resolve, reject) => {
