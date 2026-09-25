@@ -8,6 +8,11 @@ promise is reversibility: apply snapshots first, writes atomically, records exac
 and refuses refresh, disable, or restore when the current file cannot be classified safely.
 Managed client targets are inspected without following a final symbolic link, and their atomic
 replacement addresses the named directory entry rather than resolving that link again at commit.
+Uninstall runs the same coordinated disable path for every strict ownership record before removing
+OpenCodex state. Any unreadable record, conflict, or failed compensation keeps the records and
+snapshots in place, so an external client is never stranded on the removed proxy without recovery.
+
+> Decision record: [ADR-0107](../decisions/ADR-0107-uninstall-integration-recovery.md)
 
 Shared response support has a separate [bounded ingestion contract](../transports/inventory.md#bounded-response-ingestion-and-orcarouter-login):
 raw-byte callers own their byte and deadline budgets and inherit best-effort cancellation.
