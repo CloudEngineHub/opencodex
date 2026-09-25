@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
+  existsSync,
   mkdirSync,
   linkSync,
   mkdtempSync,
@@ -498,6 +499,99 @@ describe("remote workspace coordinator and executor", () => {
       arguments: { path: "project/large.txt", maxBytes: REMOTE_WORKSPACE_MAX_TOOL_RESULT_BYTES },
     });
     expect(read).toMatchObject({ ok: true, value: { content } });
+    client.close();
+    endpoint.close();
+  });
+
+  test("a timed-out mutation queued behind a command is cancelled before dequeue", async () => {
+    const state = fixture();
+    const account = generateRemoteControlIdentityKeyPair();
+    const device = generateRemoteControlIdentityKeyPair();
+    const cryptoDeviceId = randomUUID();
+    const cryptoSessionId = randomUUID();
+    const clientHandshake = RemoteControlClientHandshake.create({
+      sessionId: cryptoSessionId,
+      deviceId: cryptoDeviceId,
+      commandProfile: "codex",
+      capabilities: ["workspace.read", "workspace.write", "workspace.exec"],
+      accountPrivateKey: account.privateKey,
+    });
+    const accepted = acceptRemoteControlClientHello(clientHandshake.hello, {
+      expectedSessionId: cryptoSessionId,
+      expectedDeviceId: cryptoDeviceId,
+      accountPublicKey: account.publicKey,
+      devicePrivateKey: device.privateKey,
+      allowedCapabilities: ["workspace.read", "workspace.write", "workspace.exec"],
+    });
+    const clientCipher = clientHandshake.complete(accepted.hello, device.publicKey);
+    let releaseCommand!: () => void;
+    let commandStarted!: () => void;
+    const commandGate = new Promise<void>(resolvePromise => { releaseCommand = resolvePromise; });
+    const started = new Promise<void>(resolvePromise => { commandStarted = resolvePromise; });
+    const runner: RemoteWorkspaceCommandRunner = {
+      async run() {
+        commandStarted();
+        // Deliberately ignore AbortSignal: queued operations must still observe their own abort
+        // after this non-cooperative predecessor finally releases the shared executor queue.
+        await commandGate;
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    };
+
+    let client: EncryptedRemoteWorkspaceTransport;
+    let endpoint: EncryptedRemoteWorkspaceExecutorEndpoint;
+    let responses = 0;
+    let allResponses!: () => void;
+    const responsesDone = new Promise<void>(resolvePromise => { allResponses = resolvePromise; });
+    client = new EncryptedRemoteWorkspaceTransport({
+      executorDeviceId: `device-${cryptoDeviceId}`,
+      cipher: clientCipher,
+      // A real WebSocket send settles after queueing bytes, not after remote execution.
+      sendCiphertext: value => { void endpoint.receiveCiphertext(value); },
+      timeoutMs: 100,
+    });
+    endpoint = new EncryptedRemoteWorkspaceExecutorEndpoint({
+      executorDeviceId: `device-${cryptoDeviceId}`,
+      sessionId: cryptoSessionId,
+      rootId: "project-root",
+      capabilities: ["workspace.read", "workspace.write", "workspace.exec"],
+      cipher: accepted.cipher,
+      executor: new RemoteWorkspaceExecutor({
+        deviceId: `device-${cryptoDeviceId}`,
+        roots: [{ id: "project-root", path: state.executorRoot }],
+        commandRunner: runner,
+      }),
+      sendCiphertext: value => {
+        client.receiveCiphertext(value);
+        responses++;
+        if (responses === 2) allResponses();
+      },
+    });
+
+    const first = client.invoke({
+      requestId: randomUUID(), sessionId: cryptoSessionId,
+      executorDeviceId: `device-${cryptoDeviceId}`, rootId: "project-root",
+      tool: "exec", arguments: { command: ["ignored"], timeoutMs: 60_000 },
+    }).catch(error => error as Error);
+    await started;
+    const target = join(state.executorRoot, "project", "after-timeout.txt");
+    const queued = client.invoke({
+      requestId: randomUUID(), sessionId: cryptoSessionId,
+      executorDeviceId: `device-${cryptoDeviceId}`, rootId: "project-root",
+      tool: "write_file",
+      arguments: { path: "project/after-timeout.txt", content: "must-not-run", expectedSha256: null },
+    }).catch(error => error as Error);
+
+    const queuedFailure = await queued;
+    expect(queuedFailure).toBeInstanceOf(Error);
+    expect((queuedFailure as Error).message).toContain("cancellation was requested");
+    expect(existsSync(target)).toBe(false);
+    releaseCommand();
+    const firstFailure = await first;
+    expect(firstFailure).toBeInstanceOf(Error);
+    expect((firstFailure as Error).message).toContain("cancellation was requested");
+    await responsesDone;
+    expect(existsSync(target)).toBe(false);
     client.close();
     endpoint.close();
   });

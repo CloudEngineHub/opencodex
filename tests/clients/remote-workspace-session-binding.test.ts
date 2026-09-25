@@ -39,7 +39,7 @@ function fixture() {
     invocations,
     async send(overrides: Partial<RemoteWorkspaceExecutionRequest> = {}) {
       const message = new TextEncoder().encode(JSON.stringify({
-        version: 1, kind: "request", request: { ...request, ...overrides },
+        version: 1, kind: "request", timeoutMs: 5_000, request: { ...request, ...overrides },
       }));
       for (const frame of frameRemoteWorkspaceRpcMessage(message)) {
         await endpoint.receiveCiphertext(client.encrypt(frame));

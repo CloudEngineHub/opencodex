@@ -17,12 +17,20 @@ import {
 } from "./workspace-rpc-framing";
 
 const REMOTE_WORKSPACE_RPC_VERSION = 1 as const;
-const REMOTE_WORKSPACE_RPC_DEFAULT_TIMEOUT_MS = 30_000;
+const REMOTE_WORKSPACE_RPC_DEFAULT_TIMEOUT_MS = 65_000;
+const REMOTE_WORKSPACE_RPC_MAX_TIMEOUT_MS = 120_000;
 const REMOTE_WORKSPACE_RPC_MAX_ACTIVE_REQUESTS = 8;
 interface RemoteWorkspaceRpcRequest {
   version: typeof REMOTE_WORKSPACE_RPC_VERSION;
   kind: "request";
+  timeoutMs: number;
   request: RemoteWorkspaceExecutionRequest;
+}
+
+interface RemoteWorkspaceRpcCancel {
+  version: typeof REMOTE_WORKSPACE_RPC_VERSION;
+  kind: "cancel";
+  requestId: string;
 }
 
 interface RemoteWorkspaceRpcResponse {
@@ -32,7 +40,7 @@ interface RemoteWorkspaceRpcResponse {
   result: RemoteWorkspaceToolResult;
 }
 
-type RemoteWorkspaceRpcMessage = RemoteWorkspaceRpcRequest | RemoteWorkspaceRpcResponse;
+type RemoteWorkspaceRpcMessage = RemoteWorkspaceRpcRequest | RemoteWorkspaceRpcResponse | RemoteWorkspaceRpcCancel;
 
 interface PendingRequest {
   resolve(value: RemoteWorkspaceToolResult): void;
@@ -101,8 +109,14 @@ function parseMessage(value: Uint8Array): RemoteWorkspaceRpcMessage {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("invalid remote workspace RPC message");
   const raw = parsed as Record<string, unknown>;
   if (raw.version !== REMOTE_WORKSPACE_RPC_VERSION) throw new Error("unsupported remote workspace RPC version");
-  if (raw.kind === "request") {
-    return { version: REMOTE_WORKSPACE_RPC_VERSION, kind: "request", request: parseRequest(raw.request) };
+  if (raw.kind === "request" && Number.isSafeInteger(raw.timeoutMs)
+    && (raw.timeoutMs as number) >= 1 && (raw.timeoutMs as number) <= REMOTE_WORKSPACE_RPC_MAX_TIMEOUT_MS) {
+    return {
+      version: REMOTE_WORKSPACE_RPC_VERSION,
+      kind: "request",
+      timeoutMs: raw.timeoutMs as number,
+      request: parseRequest(raw.request),
+    };
   }
   if (raw.kind === "response" && boundedIdentifier(raw.requestId)) {
     return {
@@ -111,6 +125,9 @@ function parseMessage(value: Uint8Array): RemoteWorkspaceRpcMessage {
       requestId: raw.requestId,
       result: parseResult(raw.result),
     };
+  }
+  if (raw.kind === "cancel" && boundedIdentifier(raw.requestId)) {
+    return { version: REMOTE_WORKSPACE_RPC_VERSION, kind: "cancel", requestId: raw.requestId };
   }
   throw new Error("invalid remote workspace RPC message kind");
 }
@@ -132,7 +149,8 @@ export class EncryptedRemoteWorkspaceTransport implements RemoteWorkspaceTranspo
 
   constructor(private readonly options: EncryptedRemoteWorkspaceTransportOptions) {
     this.timeoutMs = options.timeoutMs ?? REMOTE_WORKSPACE_RPC_DEFAULT_TIMEOUT_MS;
-    if (!boundedIdentifier(options.executorDeviceId) || !Number.isSafeInteger(this.timeoutMs) || this.timeoutMs < 1) {
+    if (!boundedIdentifier(options.executorDeviceId) || !Number.isSafeInteger(this.timeoutMs)
+      || this.timeoutMs < 1 || this.timeoutMs > REMOTE_WORKSPACE_RPC_MAX_TIMEOUT_MS) {
       throw new Error("invalid encrypted remote workspace transport options");
     }
   }
@@ -150,7 +168,8 @@ export class EncryptedRemoteWorkspaceTransport implements RemoteWorkspaceTranspo
     const response = new Promise<RemoteWorkspaceToolResult>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(request.requestId);
-        reject(new Error("remote workspace request timed out"));
+        void this.sendCancellation(request.requestId);
+        reject(new Error("remote workspace request timed out; executor cancellation was requested"));
       }, this.timeoutMs);
       this.pending.set(request.requestId, { resolve, reject, timer });
     });
@@ -158,6 +177,7 @@ export class EncryptedRemoteWorkspaceTransport implements RemoteWorkspaceTranspo
       await this.sendMessage(encodeMessage({
         version: REMOTE_WORKSPACE_RPC_VERSION,
         kind: "request",
+        timeoutMs: this.timeoutMs,
         request,
       }));
     } catch {
@@ -203,6 +223,19 @@ export class EncryptedRemoteWorkspaceTransport implements RemoteWorkspaceTranspo
     this.sendTail = operation.catch(() => {});
     return operation;
   }
+
+  private async sendCancellation(requestId: string): Promise<void> {
+    try {
+      await this.sendMessage(encodeMessage({
+        version: REMOTE_WORKSPACE_RPC_VERSION,
+        kind: "cancel",
+        requestId,
+      }));
+    } catch {
+      // A failed encrypted write consumes the send counter; the session cannot safely continue.
+      this.close("remote workspace cancellation send failed");
+    }
+  }
 }
 
 export interface EncryptedRemoteWorkspaceExecutorEndpointOptions {
@@ -218,7 +251,10 @@ export interface EncryptedRemoteWorkspaceExecutorEndpointOptions {
 /** Executor-side endpoint. It accepts only authenticated, ordered E2EE session frames. */
 export class EncryptedRemoteWorkspaceExecutorEndpoint {
   private closed = false;
-  private readonly active = new Map<string, AbortController>();
+  private readonly active = new Map<string, {
+    controller: AbortController;
+    timer: ReturnType<typeof setTimeout>;
+  }>();
   private readonly reassembler = new RemoteWorkspaceRpcReassembler();
   private sendTail: Promise<void> = Promise.resolve();
 
@@ -240,6 +276,10 @@ export class EncryptedRemoteWorkspaceExecutorEndpoint {
     const requestPlaintext = this.reassembler.accept(this.options.cipher.decrypt(value));
     if (!requestPlaintext) return;
     const message = parseMessage(requestPlaintext);
+    if (message.kind === "cancel") {
+      this.active.get(message.requestId)?.controller.abort();
+      return;
+    }
     if (message.kind !== "request") throw new Error("executor received a remote workspace response");
     if (message.request.executorDeviceId !== this.options.executorDeviceId) {
       throw new Error("remote workspace encrypted request targeted another executor");
@@ -255,11 +295,13 @@ export class EncryptedRemoteWorkspaceExecutorEndpoint {
       throw new Error("remote workspace executor request limit reached");
     }
     const controller = new AbortController();
-    this.active.set(message.request.requestId, controller);
+    const timer = setTimeout(() => controller.abort(), message.timeoutMs);
+    this.active.set(message.request.requestId, { controller, timer });
     let result: RemoteWorkspaceToolResult;
     try {
       result = await this.options.executor.invoke(message.request, controller.signal);
     } finally {
+      clearTimeout(timer);
       this.active.delete(message.request.requestId);
     }
     if (this.closed) return;
@@ -286,7 +328,10 @@ export class EncryptedRemoteWorkspaceExecutorEndpoint {
     if (this.closed) return;
     this.closed = true;
     this.reassembler.clear();
-    for (const controller of this.active.values()) controller.abort();
+    for (const active of this.active.values()) {
+      clearTimeout(active.timer);
+      active.controller.abort();
+    }
     this.active.clear();
     this.options.cipher.destroy();
   }
