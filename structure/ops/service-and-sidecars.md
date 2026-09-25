@@ -244,6 +244,12 @@ identity and proven-dead liveness; unknown or transferred ownership never starts
 Direct recovery retains the lease until readiness or its bounded deadline. The normal successful
 manual-runtime update still prints the existing restart hint.
 
+The npm launcher in `bin/ocx.mjs` makes one exception after a failed update: a service recovery
+releases the lease before the service refresh, as a successful update does. The service manager
+starts the proxy outside the updater's process tree, so that proxy has to take the lease itself;
+held through the repair's health wait, the lease kept it from starting, and recovery fell through
+to a second, directly started proxy (#5760). The recovery decision is made again after the release.
+
 The npm transaction creates each staging directory exclusively and may clean that fresh path
 while the creating process still owns it. On POSIX it also creates the stage's `lib` directory,
 because npm's strict script policy plans the global tree before it creates the prefix layout
