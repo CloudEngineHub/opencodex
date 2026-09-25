@@ -16,7 +16,18 @@ import { WORKER_BUNDLES } from "./generated/worker-bundles.gen";
 export function spawnWorker(devUrl: string, key: string): Worker {
   const src = WORKER_BUNDLES[key];
   if (src) {
-    return new Worker(URL.createObjectURL(new Blob([src], { type: "text/javascript" })));
+    const blobUrl = URL.createObjectURL(new Blob([src], { type: "text/javascript" }));
+    let worker: Worker;
+    try {
+      worker = new Worker(blobUrl);
+    } catch (error) {
+      URL.revokeObjectURL(blobUrl);
+      throw error;
+    }
+    // Long-lived servers schedule workers repeatedly; release the blob URL
+    // once the thread exits instead of leaking one per run.
+    worker.addEventListener("close", () => URL.revokeObjectURL(blobUrl));
+    return worker;
   }
   return new Worker(devUrl);
 }
