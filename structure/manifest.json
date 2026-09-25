@@ -415,6 +415,7 @@
       "title": "Client Integrations",
       "scope": "Third-party client config ownership, snapshots, refresh, disable, and restore.",
       "documents": [
+        "src/cli/",
         "src/clients/",
         "src/integrations/",
         "src/lib/"
