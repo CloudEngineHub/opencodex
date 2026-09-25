@@ -630,7 +630,31 @@ describe("uninstall restores recorded third-party integrations before deleting r
       },
       aclReapPending: () => false,
     };
-    return { root, configDir, clientConfig, store, deps };
+    return { root, home, env, configDir, clientConfig, store, deps };
+  }
+
+  function addAsideProfiles(f: Awaited<ReturnType<typeof fixture>>) {
+    const asideRoot = join(f.home, ".aside");
+    const profiles = [0, 1].map(id => {
+      const detectDir = join(asideRoot, "u", String(id));
+      const configPath = join(detectDir, "models.json");
+      mkdirSync(detectDir, { recursive: true });
+      writeFileSync(configPath, '{"userSetting":"keep"}\n');
+      const store = id === 0 ? f.store
+        : createIntegrationStateStore(join(f.store.root, "aside-profiles", String(id)));
+      return { id, detectDir, configPath, store };
+    });
+    // The legacy owner is not the current profile; uninstall must use its recorded path.
+    writeFileSync(join(asideRoot, "accounts.json"), JSON.stringify({
+      currentAccountId: 1, accounts: profiles.map(({ id }) => ({ id })),
+    }));
+    for (const profile of profiles) {
+      expect(applyIntegration({ clientId: "aside", models, config, port: config.port,
+        env: f.env, home: f.home, store: profile.store,
+        resolvedPaths: { configPath: profile.configPath, detectDir: profile.detectDir },
+      }).ok).toBe(true);
+    }
+    return profiles;
   }
 
   test("restores the external file before removing the records that authorize restoration", async () => {
@@ -663,5 +687,69 @@ describe("uninstall restores recorded third-party integrations before deleting r
     } finally {
       rmSync(f.root, { recursive: true, force: true });
     }
+  });
+
+  test("restores legacy and child Aside profiles before deleting all recovery stores", async () => {
+    const f = await fixture();
+    try {
+      const profiles = addAsideProfiles(f);
+      expect(await removeOwnedConfigAfterDesktopCleanup(safeTeardown, f.deps))
+        .toEqual({ status: "removed", residualPaths: [] });
+      expect(existsSync(f.configDir)).toBe(false);
+      for (const profile of profiles) {
+        expect(JSON.parse(readFileSync(profile.configPath, "utf8")))
+          .toEqual({ userSetting: "keep" });
+      }
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
+  });
+
+  test("an unreadable Aside child record prevents every disable and config removal", async () => {
+    const f = await fixture();
+    try {
+      const profiles = addAsideProfiles(f);
+      const originals = profiles.map(profile => readFileSync(profile.configPath, "utf8"));
+      const childRecords = join(profiles[1]!.store.root, "records.json");
+      writeFileSync(childRecords, "invalid JSON");
+      await expect(removeOwnedConfigAfterDesktopCleanup(safeTeardown, f.deps))
+        .rejects.toThrow("integration ownership is invalid for recovery");
+      expect(existsSync(f.configDir)).toBe(true);
+      expect(f.store.readRecordsStrict().pi).toBeDefined();
+      expect(profiles.map(profile => readFileSync(profile.configPath, "utf8"))).toEqual(originals);
+      expect(readFileSync(childRecords, "utf8")).toBe("invalid JSON");
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
+  });
+
+  test("a conflicted Aside child retains recovery state without undoing earlier disables", async () => {
+    const f = await fixture();
+    try {
+      const profiles = addAsideProfiles(f);
+      const child = profiles[1]!;
+      const edited = JSON.parse(readFileSync(child.configPath, "utf8"));
+      edited.providers.opencodex.baseUrl = "http://user-edited.invalid/v1";
+      writeFileSync(child.configPath, `${JSON.stringify(edited)}\n`);
+      await expect(removeOwnedConfigAfterDesktopCleanup(safeTeardown, f.deps))
+        .rejects.toThrow("integration cleanup refused for aside");
+      expect(existsSync(f.configDir)).toBe(true);
+      expect(child.store.readRecordsStrict().aside).toBeDefined();
+      expect(readFileSync(child.configPath, "utf8")).toContain("user-edited.invalid");
+      expect(f.store.readRecordsStrict().pi).toBeUndefined();
+      expect(f.store.readRecordsStrict().aside).toBeUndefined();
+      expect(JSON.parse(readFileSync(profiles[0]!.configPath, "utf8"))).toEqual({ userSetting: "keep" });
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
+  });
+
+  test("an unregistered owned Aside profile refuses cleanup rather than dropping its proof", async () => {
+    const f = await fixture();
+    try {
+      const profiles = addAsideProfiles(f);
+      writeFileSync(join(f.home, ".aside", "accounts.json"), JSON.stringify({
+        currentAccountId: 0, accounts: [{ id: 0 }],
+      }));
+      await expect(removeOwnedConfigAfterDesktopCleanup(safeTeardown, f.deps))
+        .rejects.toThrow("Aside profile ownership is missing or mismatched");
+      expect(existsSync(f.configDir)).toBe(true);
+      expect(f.store.readRecordsStrict().pi).toBeDefined();
+      expect(profiles[1]!.store.readRecordsStrict().aside).toBeDefined();
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
   });
 });

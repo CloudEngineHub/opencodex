@@ -9,8 +9,13 @@ and refuses refresh, disable, or restore when the current file cannot be classif
 Managed client targets are inspected without following a final symbolic link, and their atomic
 replacement addresses the named directory entry rather than resolving that link again at commit.
 Uninstall runs the same coordinated disable path for every strict ownership record before removing
-OpenCodex state. Any unreadable record, conflict, or failed compensation keeps the records and
-snapshots in place, so an external client is never stranded on the removed proxy without recovery.
+OpenCodex state, including the legacy Aside owner and every child profile store under
+`integrations/aside-profiles/<profileId>/`. `src/cli/uninstall-integrations.ts` validates all stores
+and registered Aside paths before mutation; `src/integrations/aside-profile-context.ts` supplies
+the guarded child stores. An unreadable record, conflict, or failed compensation aborts config
+removal and retains remaining recovery state. Earlier successful disables are not rolled back;
+failed compensation can leave an intermediate client file. Inspect the reported client files and
+retained snapshots before retrying; preserved recovery state does not prove restoration completed.
 
 > Decision record: [ADR-0107](../decisions/ADR-0107-uninstall-integration-recovery.md)
 
