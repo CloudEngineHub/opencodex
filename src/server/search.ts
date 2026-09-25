@@ -84,7 +84,7 @@ export async function handleSearch(
         logCtx.routeDecision = route.routeDecision;
         return handleDevinAlphaSearch(
           body,
-          route.providerName,
+          "devin",
           config.search?.timeoutMs ?? SEARCH_UPSTREAM_TIMEOUT_MS,
           req.signal,
         );
