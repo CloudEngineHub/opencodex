@@ -202,6 +202,9 @@ Pool quota producers and account commands follow the [bounded raw-observation co
 Translated Chat requests preserve caller reasoning intent until a combo or policy selects a
 concrete target. Empty-ladder stripping and effort mapping apply to each attempt copy, never the
 shared ingress body, so a later capable fallback still receives the caller's requested effort.
+`src/server/responses/core-normalize.ts` strips an empty ladder from both parsed adapter options
+and raw reasoning on each translated Chat attempt, preserving summary controls. Policy fallback
+captures the original body before this normalization, including for its first candidate.
 
 > Decision record: [ADR-0110](../decisions/ADR-0110-chat-reasoning-failover-intent.md)
 
