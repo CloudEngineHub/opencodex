@@ -93,6 +93,7 @@ import {
   isAllowedRequestOrigin,
   isAllowedManagementOrigin,
   isApiAuthRequired,
+  isLoopbackHostname,
   jsonResponse,
   admissionFields,
   resolveApiAuth,
@@ -101,6 +102,7 @@ import {
   withCors,
   withManagementCors,
 } from "../auth-cors";
+import { managementSessionIssuance } from "../management-auth";
 import { resolveAdmissionModelScope, routeAllowedByScope } from "../admission-model-scope";
 import {
   disableResponsesRequestTimeout,
@@ -201,6 +203,11 @@ import { createWebsocketHandler } from "./websocket-handler";
 
 export type ServerIngress = "public" | "unauthenticated-loopback" | "hub-management" | "claude-intercept" | "hub-link";
 
+export function trustedLoopbackForIngress(ingress: ServerIngress, hostname: string): boolean {
+  return ingress === "unauthenticated-loopback"
+    || (ingress === "public" && isLoopbackHostname(hostname));
+}
+
 /**
  * Routes the Claude intercept TLS listener may reach. Everything else on that socket is relayed
  * to the real upstream by the listener itself, so a request that lands here with another path
@@ -220,6 +227,7 @@ export interface ServeOptionsContext {
   loopbackRouteAllowed: (url: URL, req: Request) => boolean;
   managementIngressRouteAllowed: (url: URL, req: Request) => boolean;
   linkRouteAllowed: (url: URL, req: Request) => boolean;
+  onAuthenticatedCatalog: (apiKeyId: string) => void;
   linkPolicy: () => RequestPolicyView;
   packageTreeChangedResponse: (
     req: Request,
@@ -263,7 +271,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
     ingressForServer,
     loopbackRouteAllowed,
     managementIngressRouteAllowed,
-    linkRouteAllowed,
+    linkRouteAllowed, onAuthenticatedCatalog,
     linkPolicy,
     packageTreeChangedResponse,
     serverBusyResponse,
@@ -348,6 +356,9 @@ export function createServeOptions(ctx: ServeOptionsContext) {
       if (ingress === "hub-link") {
         const admission = resolveApiAuth(req, policy);
         if (!admission) return withCors(formatErrorResponse(401, "authentication_error", "opencodex API key required"), req, policy);
+        if (requestUrl.pathname === "/v1/catalog" && requestUrl.search === ""
+          && (req.method === "GET" || req.method === "HEAD")
+          && admission.kind === "configured") onAuthenticatedCatalog(admission.keyId);
       }
       const url = requestUrl;
       const admissionOptions = { linkIngress: policy.linkIngress?.allowedKeyIds };
@@ -680,7 +691,10 @@ export function createServeOptions(ctx: ServeOptionsContext) {
             }), req, config);
           }
         }
-        const mgmtResponse = await handleManagementAPI(req, url, config, requestManagementApiDeps, principal, managementSessionControl);
+        const mgmtResponse = await handleManagementAPI(req, url, config, requestManagementApiDeps, principal, managementSessionControl, {
+          trustedLoopback: trustedLoopbackForIngress(ingress, config.hostname ?? "127.0.0.1"),
+          guiSessionIssuance: managementSessionIssuance(req, managementAuth),
+        });
         if (mgmtResponse) return withManagementCors(mgmtResponse, req, config);
         return withManagementCors(formatErrorResponse(404, "not_found", `Unknown endpoint: ${req.method} ${url.pathname}`), req, config);
       }

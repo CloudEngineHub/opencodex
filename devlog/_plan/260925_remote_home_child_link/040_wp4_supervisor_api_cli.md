@@ -40,7 +40,7 @@
 | `src/cli/capabilities.ts` | MODIFY | 네 CLI capability 선언(port/issue/status/revoke). capability table은 leaf data module이며 현재 `:925-949` 인접부에만 data를 추가한다. |
 | `structure/remote-link.md` | MODIFY (wp1 base) | pure module 문서에 runner/supervisor의 현재형 lifecycle과 ownership을 추가. 현재 dev에는 wp1 파일이 아직 없다. |
 | `skills/ocx/SKILL.md`, `skills/ocx/references/01_management_surface.md`, 관련 생성 산출물 | GENERATED MODIFY | `bun run skill:surface`로 capability surface와 link 명령을 반영한다. 수동 편집하지 않는다. |
-| `tests/server/link-routes.test.ts` | NEW | route별 principal matrix, K16 DTO, API auth/apply/remove 순서와 실패 경로. `server` domain explicit 등록. |
+| `tests/server/link-management-routes.test.ts` | NEW | route별 principal matrix, K16 DTO, API auth/apply/remove 순서와 실패 경로. `server` domain explicit 등록. |
 | `tests/clients/link-supervisor.test.ts` | NEW | injected runner, 상태 reducer 연결, pidfile argv 검증, orphan safety. `clients` explicit 등록. |
 | `tests/cli/cli-link.test.ts` | NEW | port/issue/status/revoke parsing, admin-token loopback 호출, stdout secret shape, registry/dispatch/capability parity. `cli` regex가 맞지만 explicit도 등록한다. |
 
@@ -296,7 +296,7 @@ routed = handleSessionRoutes(ctx)
 | K16 status `{role,listener,links,child}` | `LinkStore` + supervisor + listener state | `/api/link/status` JSON 및 `ocx link status` projection | role/listener/link/child enum과 nullable 값만 허용 | dashboard polling, CLI status, apply wait, reconnect 503 상태 |
 | K16 candidates/probe/confirm/apply DTO | host candidate loader, SSH probe, host confirmation, apply transaction | 각 route가 K16 exact JSON만 반환 | handler와 route tests가 extra/missing fields를 거부 | GUI, CLI status/revoke, host confirmation, link polling |
 | issue `{linkId,apiKeyId,key,listenerPort}` | loopback admin-token issue transaction | key는 issue 성공 시 단 한 번 CLI stdout으로만 전달; status/store에는 key 미저장 | CLI는 id/port/string shape와 `ocx_data_` pattern을 검증; store는 `apiKeyId`만 검증 | remote `ocx connect --link --key-stdin`, link record, revoke rollback, CLI caller |
-| pending host `{alias,fingerprint,knownHostLine,ocxVersion,expiresAt}` | probe 성공 시 process memory | persist하지 않음; confirm 전 link known_hosts에 쓰지 않음 | confirm이 alias/fingerprint exact match와 expiry를 재검증 | confirm-host, apply precondition, failed/expired probe response |
+| pending host `{alias,fingerprint,keyType,knownHostLine,expiresAt}` (`ocxVersion`은 confirm 이후 `ConfirmedHost`에만) | probe 성공 시 process memory | persist하지 않음; confirm 전 link known_hosts에 쓰지 않음 | confirm이 alias/fingerprint exact match와 expiry를 재검증 | confirm-host, apply precondition, failed/expired probe response |
 
 wp1에서 이미 정의한 `LinkRecord`의 `apiKeyId`, `tunnelPort`, `hostKeyFingerprint`, `direction`은 추가 필드가 아니다. wp4는 그 필드들을 생성·저장하는 consumer일 뿐이며 `010_wp1_link_core.md`의 chain을 따른다.
 
@@ -314,7 +314,7 @@ wp1에서 이미 정의한 `LinkRecord`의 `apiKeyId`, `tunnelPort`, `hostKeyFin
 - 활성화: `client-initiated` record. 증거: supervisor가 spawn/kill하지 않고 `client-owned`를 반환한다.
 - 활성화: `stop()` 중 새 retry가 due. 증거: timer 해제 후 spawn 0회, 모든 child 종료 await.
 
-### `tests/server/link-routes.test.ts`
+### `tests/server/link-management-routes.test.ts`
 
 - 활성화: 각 route에 no principal, paired dashboard session, admin-token + loopback, admin-token + non-loopback, local capability, Tailscale identity session을 각각 주입한다. 증거: matrix대로 status/DELETE/issue의 허용 조합만 성공하고 candidates/probe/confirm-host/apply와 모든 Tailscale 조합은 403이다.
 - 활성화: `/api/link/probe`에 unknown alias, malformed body, runner exit, fingerprint parse failure. 증거: 각각 400/404/502/502이며 known_hosts와 pending state가 의도 없이 쓰이지 않는다.
@@ -346,7 +346,7 @@ wp1에서 이미 정의한 `LinkRecord`의 `apiKeyId`, `tunnelPort`, `hostKeyFin
 | `bun run skill:surface:check` | 문서 작성 후 | 0 | 아니오 | 현재 generated CLI surface drift 없음; wp4 capability 추가 후 재실행 필요 |
 | `bun run privacy:scan` | 문서 작성 후 | 0 | 예 | target을 포함한 저장소 privacy scan |
 | `bun test tests/server/management-route-registry.test.ts tests/cli/cli-registry.test.ts tests/cli/cli-capabilities.test.ts` | 문서 작성 후 | 0 | 아니오 | 현재 registry/capability baseline focused tests; wp4 구현을 읽지 않음 |
-| `bun test tests/server/link-routes.test.ts tests/clients/link-supervisor.test.ts tests/cli/cli-link.test.ts` | wp4 구현 후 | 미실행 | 예 | 신규 테스트가 생긴 뒤 실행할 focused proof |
+| `bun test tests/server/link-management-routes.test.ts tests/clients/link-supervisor.test.ts tests/cli/cli-link.test.ts` | wp4 구현 후 | 미실행 | 예 | 신규 테스트가 생긴 뒤 실행할 focused proof |
 | `bun run typecheck` | wp4 구현 후 | 미실행 | 아니오 | 신규 source compile proof; docs-only lane에서는 실행하지 않음 |
 | `bun run skill:surface` | wp4 capability 변경 후 | 미실행 | 아니오 | generated `skills/ocx` files 갱신; 이 lane의 write scope 밖 |
 
@@ -382,7 +382,7 @@ wp1에서 이미 정의한 `LinkRecord`의 `apiKeyId`, `tunnelPort`, `hostKeyFin
 
 ## test layout registration entries
 
-`tests/server/link-routes.test.ts`는 현재 `server.match` regex에 `link`가 없어 `explicit`에 `"link-routes.test.ts": "server"`를 추가해야 한다. `tests/clients/link-supervisor.test.ts`는 `clients.match`에 seed가 없으므로 `explicit`에 `"link-supervisor.test.ts": "clients"`를 추가한다. `tests/cli/cli-link.test.ts`는 `cli.match`의 `^(?:cli|...)` seed로 분류되지만 deterministic하게 `explicit`에 `"cli-link.test.ts": "cli"`도 추가한다. 세 항목은 `scripts/test-layout/layout.json`과 `tests/fixtures/test-layout-expected.json` 양쪽에 동일하게 넣고 layout/tooling tests를 실행한다.
+`tests/server/link-management-routes.test.ts`는 현재 `server.match` regex에 `link`가 없어 `explicit`에 `"link-management-routes.test.ts": "server"`를 추가해야 한다. `tests/clients/link-supervisor.test.ts`는 `clients.match`에 seed가 없으므로 `explicit`에 `"link-supervisor.test.ts": "clients"`를 추가한다. `tests/cli/cli-link.test.ts`는 `cli.match`의 `^(?:cli|...)` seed로 분류되지만 deterministic하게 `explicit`에 `"cli-link.test.ts": "cli"`도 추가한다. 세 항목은 `scripts/test-layout/layout.json`과 `tests/fixtures/test-layout-expected.json` 양쪽에 동일하게 넣고 layout/tooling tests를 실행한다.
 
 ## structure/doc updates
 
@@ -427,3 +427,41 @@ wp4 자체는 GUI/docs-site 사용자 흐름을 추가하지 않는다. 따라�
 - K13의 exit 0 + 15초 내 첫 key-authenticated catalog lookup 성공 조건을 apply와 테스트에 반영했다.
 - K14/K6에 맞춰 `ensureStarted(): Promise<void>` single-flight, supervisor-first shutdown, 마지막 link 삭제 시 즉시 listener 종료를 추가했다.
 - stale한 locale 수 표기를 현재 `gui/src/i18n/shared.ts:6-17`의 10개로 고쳤다. 003_decisions.md와 남은 계약 불일치는 없다.
+
+## wp4 P 재검증 (아키텍트 Nash, gpt-6-sol high, 2026-09-25) — 이 절이 앞선 내용보다 우선한다
+
+| ID | 제안 | 처분 |
+|---|---|---|
+| W4-1 | 원격 명령은 wp3의 `ocx connect --link --key-stdin --tunnel-port P --link-id ID`(src/cli/connect.ts:57-64,408-454) 그대로 | 유지 |
+| W4-2 | 리스너 API는 `ensureStarted()`, `status()`, `close()`, `stop()`와 optional set의 `registerSupervisorStop()`(link-listener.ts:32-40, optional-listeners.ts:25-35,61-75). `closeIfUnused`는 없음 | 수용: 마지막 링크 삭제 후 store가 비었음을 확인하고 `close()` |
+| W4-3 | supervisor는 인스턴스 하나. optional-listeners.start() 뒤 시작하고 같은 인스턴스를 관리 라우트에 넘기며, 종료 콜백은 종료 전에 등록(supervisor → listener 순서, optional-listeners.ts:69-75, index.ts:767-777) | 수용. index.ts는 893줄 이하 유지 |
+| W4-4 | Tailscale 세션이 `gui-session`으로 합쳐짐(management-auth.ts:321-329,555-562; gui-session.ts:12-23,183-193). 루프백 여부는 Host가 아니라 입구로 판정해야 함 | 수용: 세션 발급 방식 `tailscale-identity`를 구분하는 술어를 추가해 링크 라우트에서 거부. `ManagementContext`에 serve-options가 아는 입구에서 파생한 `trustedLoopbackIngress: boolean`을 추가하고, 관리자 토큰 경로(issue, status, DELETE)는 이 값이 true일 때만 허용 |
+| W4-5 | K13 관찰 지점 없음 | 수용: link-listener에 링크 키 id별 "첫 인증 요청" 관찰자(`awaitFirstAdmission(apiKeyId, timeoutMs)`)를 추가, 15초 제한 |
+| W4-6 | K16 투영 필요 | 수용: 순수 함수 `projectLinkStatus(store, supervisorStates, listenerStatus, config)`. 역할은 `standalone`→standalone, 링크가 있는 standalone/hub→home, `client`+link transport→child. 문자열 캐스트 금지 |
+| W4-7 | 키 발급 헬퍼 추출 시 이름 검증·저장 동작 유지, 실패 시 되돌림 | 수용: apply/remove의 각 단계 실패 시 발급한 키를 메모리와 저장소에서 모두 제거(보상 트랜잭션), 테스트로 고정 |
+| W4-8 | ssh-keygen도 주입, 고아 정리는 정확한 argv 비교만 | 수용: `SshRunner`에 `fingerprint(tempFile)` 추가. Linux는 `/proc/<pid>/cmdline`(NUL 구분)로 정확 비교. macOS는 `ps -o command= -p <pid>` 결과가 argv를 공백으로 이은 문자열과 정확히 같고 어떤 argv 요소에도 공백이 없을 때만 일치로 본다. 그 밖에는 unverified로 두고 종료하지 않는다 |
+| W4-9 | 크기 상한 확인, skill surface는 생성 명령으로 갱신 | 수용 |
+
+
+### 반영 확인 (Nash MISALIGNED) — 위 표를 다음처럼 확정
+- W4-3: `OptionalListenerSet`에 `linkSupervisor(): LinkSupervisor`(생성 시 한 번 만든 인스턴스를 돌려주는 접근자)를 추가한다. `ManagementApiDeps`에는 인스턴스가 아니라 게터 `linkSupervisor: () => optionalListeners.linkSupervisor()`를 넣어 생성 순서 문제를 없앤다. supervisor 시작과 종료 콜백 등록은 `optionalListeners.start()` 내부에서 한다. `src/server/index.ts`는 순증 0줄(기존 한 줄을 바꾸는 방식)이며 B 끝에 줄 수를 잰다.
+- W4-4: `trustedLoopbackIngress`는 입구가 "unauthenticated-loopback"이거나, "public"이면서 바인드 주소가 루프백일 때만 true. "hub-management"(Tailscale Serve)와 "hub-link"는 false. 테스트: 네 입구 각각의 값.
+- W4-5: `awaitFirstAdmission(apiKeyId, timeoutMs)`는 그 키로 인증된 `GET` 또는 `HEAD /v1/catalog`만 관찰한다.
+- W4-6: 근거: D1에 따라 링크를 여는 기계의 runtimeRole을 바꾸지 않으므로 "home"은 역할이 아니라 링크 보유로 정의한다. 투영: runtimeRole `client`(transport 무관) → child, 그 밖에 store에 링크가 하나 이상 → home, 나머지 → standalone.
+- W4-7: 보상은 apply에서 새로 발급한 키에만 적용한다. DELETE 순서: 터널 중지 → 원격 `ocx disconnect` → 성공하면 키 회수 → 레코드 삭제 → 링크가 없으면 `close()`. 원격 해제가 실패하면 레코드와 키를 유지하고 502 `{error:{code:"remote_disconnect_failed"}}`를 돌려준다. 요청 본문 `{force:true}`일 때만 원격 단계를 건너뛰고 회수·삭제한다(UI는 이 경우 따로 확인).
+- W4-8: macOS는 항상 unverified로 두고 종료하지 않는다(ps 문자열은 정확한 argv 증명이 아님). 정상 종료·드레인 재시작 시 supervisor 종료 콜백이 자식 ssh를 SIGTERM 후 대기로 정리하므로 고아는 비정상 종료에서만 남는다. 그 경우 새 터널은 failed{forward}가 되고 status reason에 "stale tunnel may hold the port"를 싣는다. Linux는 /proc cmdline 정확 비교 후에만 종료.
+- W4-9: 040 본문의 "`src/link/` 없음" 서술(:391, :416 부근)은 wp1-wp3 커밋 이후 무효.
+
+## 감사 반영 (Hume FAIL r1, wp4 계획 감사) — 이 절이 앞선 모든 내용보다 우선한다
+
+1. 테스트 이름: 서버 라우트 테스트는 `tests/server/link-management-routes.test.ts`로 하고 layout.json explicit와 test-layout-expected.json에 `"link-management-routes.test.ts": "server"`로 등록한다. 기존 `tests/clients/link-routes.test.ts`와 겹치지 않는다. 다른 새 테스트도 같은 방식으로 basename 전역 충돌을 확인한다(`rg -n '"<basename>"' scripts/test-layout/layout.json`이 비어 있어야 함).
+2. 입구 배선: `handleManagementAPI(req, url, ..., requestIngress: ManagementRequestIngress = { trustedLoopback: false })` 형태로 요청별 입구 정보를 추가한다(`src/server/management-api.ts:187-194,276`). `serve-options.ts`의 관리 API 호출 지점(:655-683)이 `ingressForServer(requestServer)`와 바인드 주소로 `trustedLoopback`을 계산해 넘긴다(W4-4 규칙). `ManagementContext`에 `trustedLoopbackIngress: boolean` 필드를 추가하고 link 라우트만 읽는다. 직접 호출 테스트는 기본값 false. 테스트: public(루프백 바인드)·unauthenticated-loopback은 관리자 토큰으로 issue/status/DELETE 허용, hub-management(Tailscale Serve)·hub-link는 관리자 토큰이어도 403, Tailscale 신원 세션은 모든 link 라우트 403.
+3. K13 관찰 훅: `LinkListenerLifecycle`에 `onAuthenticatedCatalog(listener: (apiKeyId: string) => void): () => void`(구독 해제 함수 반환)를 추가하고 `OptionalListenerSet`이 그대로 노출한다. `serve-options.ts`에서 ingress가 hub-link이고, 조기 인증 게이트가 성공했고, 경로가 정확히 `/v1/catalog`, 메서드가 GET 또는 HEAD일 때만, 인증 결과의 keyId로 알린다. `awaitFirstAdmission(apiKeyId, timeoutMs)`는 이 훅 위의 헬퍼(`src/link/admission-wait.ts`)로, apply가 원격 connect 명령을 시작하기 전에 구독한다. 테스트: 실제 링크 리스너에서 올바른 키 GET /v1/catalog → 해결, 다른 키 → 미해결, /v1/models → 미해결, 15초 제한은 주입 시계로 → timeout 오류.
+4. 지문 명령: `src/link/ssh-argv.ts`에 `buildFingerprintArgv(tempKnownHostsFile: string): string[]` → `["ssh-keygen", "-l", "-f", <abs path>]`(optionPath와 같은 경로 검증)을 추가. `SshRunner` 계약은 `run(argv, { stdin?, timeoutMs, maxOutputBytes })`, `spawnTunnel(argv)` 두 개이고, 지문은 `run(buildFingerprintArgv(...))`로 실행한다(별도 메서드 없음, 앞 절의 `fingerprint()` 표기 폐기). 기본 구현은 `Bun.spawn(argv)`(셸 없음), 출력 64 KiB 상한. 출력 파싱은 순수 함수 `parseFingerprintLine(stdout)`가 `<bits> <SHA256:...> <alias> (<TYPE>)` 한 줄만 받는다. 테스트: 정확한 argv, 여러 줄·빈 출력·형식 불일치 거부.
+5. 비차단 반영: pending 호스트 타입은 `{alias, fingerprint, keyType, probedAt}`만 갖고, `ocxVersion`은 confirm-host 이후의 `ConfirmedHost`에만 있다. 검증 표에 `bun run structure:check`, `bun run skill:surface:check`를 명시한다. 공개 CLI 문서는 wp5(docs-site)에서 다루며 이 PR 설명에 후속으로 적는다.
+
+## 감사 반영 (Hume FAIL r2)
+
+1. Tailscale 구분: `src/server/management-auth.ts`에 `managementSessionIssuance(req, managementAuth): GuiSessionIssuance | null`을 추가한다(요청이 제시한 GUI 세션 토큰의 레코드 `issuance`, 세션이 아니면 null; src/server/gui-session.ts:22,146,154의 필드). `ManagementContext`에 `guiSessionIssuance: GuiSessionIssuance | null`을 넣고, 모든 link 라우트는 권한 분기 전에 `guiSessionIssuance === "tailscale-identity"`이면 403 `{error:{code:"tailscale_session_refused"}}`를 돌려준다. 테스트: 7개 link 라우트 각각에 대해 Tailscale 신원 세션 403, 루프백 페어링 세션은 대시보드 라우트 허용.
+2. 테스트 이름 참조는 문서 전체에서 `tests/server/link-management-routes.test.ts` / `"link-management-routes.test.ts"`로 통일했다.
+3. 비차단: `buildFingerprintArgv`는 경로를 따옴표 없이 argv 한 요소로 그대로 넘긴다(절대 경로·제어 문자 없음만 검증, `optionPath`의 공백 인용은 `ssh -o` 전용). 필드 체인 표의 pending host에서 `ocxVersion`을 제거했다.
