@@ -516,7 +516,7 @@ export function chatCompletionsToResponsesBody(raw: unknown): Rec {
         if (msg.tool_calls !== undefined) {
           toolCallsToItems(msg.tool_calls, input, knownNameByCallId, awaitingToolResult);
         }
-        if (msg.function_call !== undefined) {
+        if (msg.function_call !== undefined && msg.function_call !== null) {
           const call = legacyFunctionCallToItem(
             msg.function_call,
             input,

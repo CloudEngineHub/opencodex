@@ -105,6 +105,18 @@ describe("Chat media stays native or fails explicitly at translation", () => {
     });
   });
 
+  test("a null legacy function call preserves a textual assistant message", () => {
+    const translated = chatCompletionsToResponsesBody({
+      model: "model",
+      messages: [{ role: "assistant", content: "The result is 42.", function_call: null }],
+    });
+
+    expect(translated.input).toEqual([{
+      type: "message", role: "assistant",
+      content: [{ type: "output_text", text: "The result is 42." }],
+    }]);
+  });
+
   test("an orphan legacy function result is rejected instead of silently discarded", () => {
     expect(() => chatCompletionsToResponsesBody({
       model: "model",

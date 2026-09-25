@@ -346,6 +346,7 @@
       "scope": "Cross-vendor Chat Completions behavior: reasoning, tool results, structured output, parallel tools.",
       "documents": [
         "src/adapters/",
+        "src/chat/",
         "src/responses/"
       ]
     },
