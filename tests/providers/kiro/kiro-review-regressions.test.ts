@@ -326,6 +326,25 @@ describe("Kiro review regressions", () => {
     expect(set.activeAccountId).toBe(concurrent.id);
   });
 
+  test("a failed first forced login rolls back the newly created provider set", async () => {
+    const rawCredential: OAuthCredentials = {
+      access: "access-first", refresh: "refresh-first", expires: Date.now() + 60_000,
+      accountId: "arn:aws:codewhisperer:us-east-1:123456789012:profile/first-only",
+    };
+    const originalLogin = OAUTH_PROVIDERS.kiro.login;
+    OAUTH_PROVIDERS.kiro.login = async () => rawCredential;
+    try {
+      await expect(runLogin("kiro", {} as OAuthController, { forceLogin: true }, {
+        loadConfig: config,
+        saveConfig: () => { throw new Error("config publication failed"); },
+        settleKiroLoginTransaction: () => {},
+      })).rejects.toThrow("config publication failed");
+    } finally {
+      OAUTH_PROVIDERS.kiro.login = originalLogin;
+    }
+    expect(getAccountSet("kiro")).toBeNull();
+  });
+
   test("forced login refuses custom import DB selectors that diverge from the CLI store", async () => {
     seedKiroCliDb("aoa-primary", "rt-primary", {
       profileArn: "arn:aws:codewhisperer:us-east-1:123456789012:profile/primary",

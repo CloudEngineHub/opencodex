@@ -765,7 +765,7 @@ function serializeMutation<T>(work: () => Promise<T>, retainedValues: readonly u
   drainOAuthMutations();
   return result;
 }
-export function mutateStore<T>(fn:(store:AuthStore)=>T|Promise<T>, retainedValues: readonly unknown[] = [], options?: { waitMs?: number; assertBeforePersist?: () => void; scrubLegacyBackup?: (result: T) => readonly string[] }):Promise<T>{return serializeMutation(async()=>{const guard=await createOAuthFileLock({path:getAuthStoreLockPath(),staleAfterMs:30000}).acquire();try{
+export function mutateStore<T>(fn:(store:AuthStore)=>T|Promise<T>, retainedValues: readonly unknown[] = [], options?: { waitMs?: number; assertBeforePersist?: () => void; scrubLegacyBackup?: (result: T) => readonly string[]; finalizeResult?: (result: T, store: AuthStore) => void }):Promise<T>{return serializeMutation(async()=>{const guard=await createOAuthFileLock({path:getAuthStoreLockPath(),staleAfterMs:30000}).acquire();try{
     const { store, hadLegacy } = loadAuthStoreInternal();
     if (hadLegacy) backupLegacyOnce();
     const selections = new Map(Object.entries(store).map(([provider, set]) => [provider, {
@@ -798,6 +798,9 @@ export function mutateStore<T>(fn:(store:AuthStore)=>T|Promise<T>, retainedValue
         changedProviders.push(provider);
       }
     }
+    // Receipt-producing mutations need the revision assigned by the bookkeeping above, not the
+    // provisional value visible inside their callback. Finalization cannot await or mutate disk.
+    options?.finalizeResult?.(result, store);
     persist(store);
     if (scrubbedProviders.length > 0) scrubLegacyBackup(scrubbedProviders);
     for (const provider of changedProviders) publishAccountSelection(provider, "oauth");
@@ -900,7 +903,12 @@ export async function saveCredentialWithReceipt(
       previousActiveAccountId,
       previousAccount: previousAccounts.get(accountId),
     };
-  }, [provider, safe], { assertBeforePersist: opts.assertBeforePersist });
+  }, [provider, safe], {
+    assertBeforePersist: opts.assertBeforePersist,
+    finalizeResult: (receipt, store) => {
+      receipt.selectionRevision = store[provider]?.selectionRevision;
+    },
+  });
 }
 
 /** Ordinary callers do not acquire rollback authority merely by saving a credential. */
