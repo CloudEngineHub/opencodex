@@ -245,9 +245,11 @@ Direct recovery retains the lease until readiness or its bounded deadline. The n
 manual-runtime update still prints the existing restart hint.
 
 The npm transaction creates each staging directory exclusively and may clean that fresh path
-while the creating process still owns it. A later update only reports staging leftovers. It does
-not recursively delete them from a marker: the marker is not an authorization secret, and a
-neighbouring writer could replace a previously checked pathname with a link before traversal.
+while the creating process still owns it. On POSIX it also creates the stage's `lib` directory,
+because npm's strict script policy plans the global tree before it creates the prefix layout
+(#5760). A later update only reports staging leftovers. It does not recursively delete them
+from a marker: the marker is not an authorization secret, and a neighbouring writer could
+replace a previously checked pathname with a link before traversal.
 
 The probe ceilings are module-load constants in `src/server/proxy-liveness.ts`: 750 ms for the
 shared default and 1500 ms (three attempts) for `SERVICE_STOP_LIVENESS` and
