@@ -819,63 +819,127 @@ export function getCredential(provider: string): OAuthCredentials | null {
  * active slot / whole set instead. An explicit add-account login can preserve the legacy slot;
  * an identity-less credential then gets its deterministic refresh-derived account id.
  */
-export async function saveCredential(
+export interface OAuthCredentialWriteReceipt {
+  provider: string;
+  accountId: string;
+  credentialGeneration: string;
+  selectionRevision: string | undefined;
+  previousActiveAccountId: string | undefined;
+  previousAccount: ProviderAccount | undefined;
+}
+
+export async function saveCredentialWithReceipt(
   provider: string,
   cred: OAuthCredentials,
   opts: { preserveIdentityless?: boolean; assertBeforePersist?: () => void } = {},
-): Promise<void> {
+): Promise<OAuthCredentialWriteReceipt | null> {
   const safe = normalizeCredential(cred);
-  if (!safe) return;
-  await mutateStore(store => {
+  if (!safe) return null;
+  return await mutateStore(store => {
     const set = store[provider];
+    const previousActiveAccountId = set?.activeAccountId;
+    const previousAccounts = new Map(
+      set?.accounts.map(account => [account.id, structuredClone(account)]) ?? [],
+    );
     // Login explicitly selects an account, including a re-login to the same slot.
     if (set) set.selectionRevision = randomUUID();
     const identity = safe.accountId ?? safe.email;
+    let accountId: string;
     if (!set || SINGLE_SLOT_PROVIDERS.has(provider)) {
       const id = newAccountId(safe);
       store[provider] = { activeAccountId: id, accounts: [{ id, credential: safe, addedAt: Date.now() }] };
-      return;
-    }
-    if (identity) {
+      accountId = id;
+    } else if (identity) {
       const existing = set.accounts.find(a => (a.credential.accountId ?? a.credential.email) === identity);
       if (existing) {
         existing.credential = safe;
         delete existing.needsReauth;
         set.activeAccountId = existing.id;
-        return;
+        accountId = existing.id;
+      } else {
+        // Legacy migration: a pre-identity row (no accountId/email) for this provider is the
+        // SAME human re-logging in after the identity extraction shipped — upgrading the
+        // active identity-less row in place prevents a stale duplicate that stays selectable
+        // and would re-refresh into a second row with the same identity.
+        const active = set.accounts.find(a => a.id === set.activeAccountId);
+        if (!opts.preserveIdentityless && active && active.credential.accountId === undefined && active.credential.email === undefined) {
+          active.credential = safe;
+          delete active.needsReauth;
+          accountId = active.id;
+        } else {
+          const id = distinctAccountId(safe, set.accounts);
+          set.accounts.push({ id, credential: safe, addedAt: Date.now() });
+          set.activeAccountId = id;
+          accountId = id;
+        }
       }
-      // Legacy migration: a pre-identity row (no accountId/email) for this provider is the
-      // SAME human re-logging in after the identity extraction shipped — upgrading the
-      // active identity-less row in place prevents a stale duplicate that stays selectable
-      // and would re-refresh into a second row with the same identity.
+    } else if (opts.preserveIdentityless) {
+      const id = distinctAccountId(safe, set.accounts);
+      set.accounts.push({ id, credential: safe, addedAt: Date.now() });
+      set.activeAccountId = id;
+      accountId = id;
+    } else {
+      // No identity during a normal login: replace the active slot in place.
       const active = set.accounts.find(a => a.id === set.activeAccountId);
-      if (!opts.preserveIdentityless && active && active.credential.accountId === undefined && active.credential.email === undefined) {
+      if (active) {
         active.credential = safe;
         delete active.needsReauth;
-        return;
+        accountId = active.id;
+      } else {
+        const id = distinctAccountId(safe, set.accounts);
+        set.accounts.push({ id, credential: safe, addedAt: Date.now() });
+        set.activeAccountId = id;
+        accountId = id;
       }
-      const id = distinctAccountId(safe, set.accounts);
-      set.accounts.push({ id, credential: safe, addedAt: Date.now() });
-      set.activeAccountId = id;
-      return;
     }
-    if (opts.preserveIdentityless) {
-      const id = distinctAccountId(safe, set.accounts);
-      set.accounts.push({ id, credential: safe, addedAt: Date.now() });
-      set.activeAccountId = id;
-      return;
-    }
-    // No identity during a normal login: replace the active slot in place.
-    const active = set.accounts.find(a => a.id === set.activeAccountId);
-    if (active) {
-      active.credential = safe;
-      delete active.needsReauth;
-    } else {
-      const id = distinctAccountId(safe, set.accounts);
-      set.accounts.push({ id, credential: safe, addedAt: Date.now() });
-      set.activeAccountId = id;
-    }
+    return {
+      provider,
+      accountId,
+      credentialGeneration: credentialGeneration(safe),
+      selectionRevision: store[provider]?.selectionRevision,
+      previousActiveAccountId,
+      previousAccount: previousAccounts.get(accountId),
+    };
   }, [provider, safe], { assertBeforePersist: opts.assertBeforePersist });
+}
+
+/** Ordinary callers do not acquire rollback authority merely by saving a credential. */
+export async function saveCredential(
+  provider: string,
+  cred: OAuthCredentials,
+  opts: { preserveIdentityless?: boolean; assertBeforePersist?: () => void } = {},
+): Promise<void> {
+  await saveCredentialWithReceipt(provider, cred, opts);
+}
+
+/** Compensate one owned login write without deleting or selecting over concurrent work. */
+export async function rollbackCredentialWriteIfMatch(
+  receipt: OAuthCredentialWriteReceipt,
+): Promise<"rolled-back" | "stale"> {
+  return await mutateStore(store => {
+    const set = store[receipt.provider];
+    const index = set?.accounts.findIndex(account => account.id === receipt.accountId) ?? -1;
+    if (!set || index < 0) return "stale" as const;
+    const current = set.accounts[index]!;
+    if (credentialGeneration(current.credential) !== receipt.credentialGeneration) return "stale" as const;
+    // A later explicit selection of the same account owns that choice. Do not remove or rewrite
+    // the selected slot underneath it; the failed login can report failure without erasing newer state.
+    if (set.activeAccountId === receipt.accountId
+      && set.selectionRevision !== receipt.selectionRevision) return "stale" as const;
+
+    if (receipt.previousAccount) set.accounts[index] = structuredClone(receipt.previousAccount);
+    else set.accounts.splice(index, 1);
+    if (set.accounts.length === 0) {
+      delete store[receipt.provider];
+      return "rolled-back" as const;
+    }
+    if (set.activeAccountId === receipt.accountId) {
+      const previousStillExists = receipt.previousActiveAccountId
+        && set.accounts.some(account => account.id === receipt.previousActiveAccountId);
+      set.activeAccountId = previousStillExists ? receipt.previousActiveAccountId! : set.accounts[0]!.id;
+    }
+    return "rolled-back" as const;
+  }, [receipt]);
 }
 
 /**
