@@ -16,13 +16,14 @@ import {
   frameRemoteWorkspaceRpcMessage,
 } from "./workspace-rpc-framing";
 
-const REMOTE_WORKSPACE_RPC_VERSION = 1 as const;
+// Old endpoints execute request frames immediately and cannot safely participate in prepare/grant.
+const REMOTE_WORKSPACE_RPC_VERSION = 2 as const;
 const REMOTE_WORKSPACE_RPC_DEFAULT_TIMEOUT_MS = 65_000;
 const REMOTE_WORKSPACE_RPC_MAX_TIMEOUT_MS = 120_000;
 const REMOTE_WORKSPACE_RPC_MAX_ACTIVE_REQUESTS = 8;
 interface RemoteWorkspaceRpcRequest {
   version: typeof REMOTE_WORKSPACE_RPC_VERSION;
-  kind: "request";
+  kind: "prepare";
   timeoutMs: number;
   request: RemoteWorkspaceExecutionRequest;
 }
@@ -33,6 +34,12 @@ interface RemoteWorkspaceRpcCancel {
   requestId: string;
 }
 
+interface RemoteWorkspaceRpcGrant {
+  version: typeof REMOTE_WORKSPACE_RPC_VERSION;
+  kind: "grant";
+  requestId: string;
+}
+
 interface RemoteWorkspaceRpcResponse {
   version: typeof REMOTE_WORKSPACE_RPC_VERSION;
   kind: "response";
@@ -40,7 +47,7 @@ interface RemoteWorkspaceRpcResponse {
   result: RemoteWorkspaceToolResult;
 }
 
-type RemoteWorkspaceRpcMessage = RemoteWorkspaceRpcRequest | RemoteWorkspaceRpcResponse | RemoteWorkspaceRpcCancel;
+type RemoteWorkspaceRpcMessage = RemoteWorkspaceRpcRequest | RemoteWorkspaceRpcResponse | RemoteWorkspaceRpcCancel | RemoteWorkspaceRpcGrant;
 
 interface PendingRequest {
   resolve(value: RemoteWorkspaceToolResult): void;
@@ -109,11 +116,11 @@ function parseMessage(value: Uint8Array): RemoteWorkspaceRpcMessage {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("invalid remote workspace RPC message");
   const raw = parsed as Record<string, unknown>;
   if (raw.version !== REMOTE_WORKSPACE_RPC_VERSION) throw new Error("unsupported remote workspace RPC version");
-  if (raw.kind === "request" && Number.isSafeInteger(raw.timeoutMs)
+  if (raw.kind === "prepare" && Number.isSafeInteger(raw.timeoutMs)
     && (raw.timeoutMs as number) >= 1 && (raw.timeoutMs as number) <= REMOTE_WORKSPACE_RPC_MAX_TIMEOUT_MS) {
     return {
       version: REMOTE_WORKSPACE_RPC_VERSION,
-      kind: "request",
+      kind: "prepare",
       timeoutMs: raw.timeoutMs as number,
       request: parseRequest(raw.request),
     };
@@ -126,8 +133,8 @@ function parseMessage(value: Uint8Array): RemoteWorkspaceRpcMessage {
       result: parseResult(raw.result),
     };
   }
-  if (raw.kind === "cancel" && boundedIdentifier(raw.requestId)) {
-    return { version: REMOTE_WORKSPACE_RPC_VERSION, kind: "cancel", requestId: raw.requestId };
+  if ((raw.kind === "cancel" || raw.kind === "grant") && boundedIdentifier(raw.requestId)) {
+    return { version: REMOTE_WORKSPACE_RPC_VERSION, kind: raw.kind, requestId: raw.requestId };
   }
   throw new Error("invalid remote workspace RPC message kind");
 }
@@ -173,19 +180,33 @@ export class EncryptedRemoteWorkspaceTransport implements RemoteWorkspaceTranspo
       }, this.timeoutMs);
       this.pending.set(request.requestId, { resolve, reject, timer });
     });
+    const pending = this.pending.get(request.requestId)!;
+    // Observe the response immediately: transport backpressure must not defer timeout delivery
+    // or leave a rejected response promise unobserved while a write is still waiting to settle.
+    void this.prepareAndGrant(request, pending);
+    return await response;
+  }
+
+  private async prepareAndGrant(request: RemoteWorkspaceExecutionRequest, pending: PendingRequest): Promise<void> {
     try {
       await this.sendMessage(encodeMessage({
         version: REMOTE_WORKSPACE_RPC_VERSION,
-        kind: "request",
+        kind: "prepare",
         timeoutMs: this.timeoutMs,
         request,
       }));
+      // Check again inside the serialized send queue: another write can delay this grant after
+      // prepare has settled. A request that has already timed out must never receive a grant.
+      await this.sendMessage(encodeMessage({
+        version: REMOTE_WORKSPACE_RPC_VERSION,
+        kind: "grant",
+        requestId: request.requestId,
+      }), () => this.pending.get(request.requestId) === pending);
     } catch {
       // A failed encrypted write consumes a directional counter. Continuing would make every
       // later frame undecryptable, so fail every pending operation instead of waiting for timeout.
       this.close("remote workspace send failed");
     }
-    return await response;
   }
 
   receiveCiphertext(value: Uint8Array): void {
@@ -213,8 +234,9 @@ export class EncryptedRemoteWorkspaceTransport implements RemoteWorkspaceTranspo
     this.pending.clear();
   }
 
-  private sendMessage(message: Uint8Array): Promise<void> {
+  private sendMessage(message: Uint8Array, shouldSend: () => boolean = () => true): Promise<void> {
     const operation = this.sendTail.then(async () => {
+      if (!shouldSend()) return;
       if (!this.online) throw new Error("remote workspace transport is closed");
       for (const frame of frameRemoteWorkspaceRpcMessage(message)) {
         await this.options.sendCiphertext(this.options.cipher.encrypt(frame));
@@ -254,6 +276,8 @@ export class EncryptedRemoteWorkspaceExecutorEndpoint {
   private readonly active = new Map<string, {
     controller: AbortController;
     timer: ReturnType<typeof setTimeout>;
+    request: RemoteWorkspaceExecutionRequest;
+    started: boolean;
   }>();
   private readonly reassembler = new RemoteWorkspaceRpcReassembler();
   private sendTail: Promise<void> = Promise.resolve();
@@ -277,10 +301,25 @@ export class EncryptedRemoteWorkspaceExecutorEndpoint {
     if (!requestPlaintext) return;
     const message = parseMessage(requestPlaintext);
     if (message.kind === "cancel") {
-      this.active.get(message.requestId)?.controller.abort();
+      const active = this.active.get(message.requestId);
+      if (active) {
+        active.controller.abort();
+        if (!active.started) {
+          clearTimeout(active.timer);
+          this.active.delete(message.requestId);
+        }
+      }
       return;
     }
-    if (message.kind !== "request") throw new Error("executor received a remote workspace response");
+    if (message.kind === "grant") {
+      const active = this.active.get(message.requestId);
+      if (!active || active.controller.signal.aborted) return;
+      if (active.started) throw new Error("duplicate remote workspace execution grant");
+      active.started = true;
+      await this.executeGranted(active.request, active.controller, active.timer);
+      return;
+    }
+    if (message.kind !== "prepare") throw new Error("executor received a remote workspace response");
     if (message.request.executorDeviceId !== this.options.executorDeviceId) {
       throw new Error("remote workspace encrypted request targeted another executor");
     }
@@ -295,14 +334,25 @@ export class EncryptedRemoteWorkspaceExecutorEndpoint {
       throw new Error("remote workspace executor request limit reached");
     }
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), message.timeoutMs);
-    this.active.set(message.request.requestId, { controller, timer });
+    const timer = setTimeout(() => {
+      controller.abort();
+      const active = this.active.get(message.request.requestId);
+      if (active && !active.started) this.active.delete(message.request.requestId);
+    }, message.timeoutMs);
+    this.active.set(message.request.requestId, { controller, timer, request: message.request, started: false });
+  }
+
+  private async executeGranted(
+    request: RemoteWorkspaceExecutionRequest,
+    controller: AbortController,
+    timer: ReturnType<typeof setTimeout>,
+  ): Promise<void> {
     let result: RemoteWorkspaceToolResult;
     try {
-      result = await this.options.executor.invoke(message.request, controller.signal);
+      result = await this.options.executor.invoke(request, controller.signal);
     } finally {
       clearTimeout(timer);
-      this.active.delete(message.request.requestId);
+      this.active.delete(request.requestId);
     }
     if (this.closed) return;
     let responsePlaintext: Uint8Array;
@@ -310,14 +360,14 @@ export class EncryptedRemoteWorkspaceExecutorEndpoint {
       responsePlaintext = encodeMessage({
         version: REMOTE_WORKSPACE_RPC_VERSION,
         kind: "response",
-        requestId: message.request.requestId,
+        requestId: request.requestId,
         result,
       });
     } catch {
       responsePlaintext = encodeMessage({
         version: REMOTE_WORKSPACE_RPC_VERSION,
         kind: "response",
-        requestId: message.request.requestId,
+        requestId: request.requestId,
         result: { ok: false, error: "remote workspace result exceeded the encrypted frame limit" },
       });
     }

@@ -503,6 +503,69 @@ describe("remote workspace coordinator and executor", () => {
     endpoint.close();
   });
 
+  test("a prepare delayed by send backpressure never grants a timed-out mutation", async () => {
+    const state = fixture();
+    const account = generateRemoteControlIdentityKeyPair();
+    const device = generateRemoteControlIdentityKeyPair();
+    const deviceId = randomUUID();
+    const sessionId = randomUUID();
+    const handshake = RemoteControlClientHandshake.create({
+      sessionId, deviceId, commandProfile: "codex", capabilities: ["workspace.write"],
+      accountPrivateKey: account.privateKey,
+    });
+    const accepted = acceptRemoteControlClientHello(handshake.hello, {
+      expectedSessionId: sessionId, expectedDeviceId: deviceId,
+      accountPublicKey: account.publicKey, devicePrivateKey: device.privateKey,
+      allowedCapabilities: ["workspace.write"],
+    });
+    let releaseSend!: () => void;
+    const backpressure = new Promise<void>(resolve => { releaseSend = resolve; });
+    let markDrained!: () => void;
+    const drained = new Promise<void>(resolve => { markDrained = resolve; });
+    let endpoint!: EncryptedRemoteWorkspaceExecutorEndpoint;
+    let sent = 0;
+    const client = new EncryptedRemoteWorkspaceTransport({
+      executorDeviceId: deviceId, cipher: handshake.complete(accepted.hello, device.publicKey),
+      timeoutMs: 50,
+      async sendCiphertext(value) {
+        sent++;
+        if (sent === 1) await backpressure;
+        await endpoint.receiveCiphertext(value);
+        if (sent === 2) markDrained();
+      },
+    });
+    let invocations = 0;
+    const executor = new RemoteWorkspaceExecutor({
+      deviceId, roots: [{ id: "project-root", path: state.executorRoot }],
+    });
+    endpoint = new EncryptedRemoteWorkspaceExecutorEndpoint({
+      executorDeviceId: deviceId, sessionId, rootId: "project-root",
+      capabilities: ["workspace.write"], cipher: accepted.cipher,
+      executor: { invoke(request, signal) { invocations++; return executor.invoke(request, signal); } },
+      sendCiphertext: value => client.receiveCiphertext(value),
+    });
+    const target = join(state.executorRoot, "project", "delayed-prepare.txt");
+    try {
+      await expect(client.invoke({
+        requestId: randomUUID(), sessionId, executorDeviceId: deviceId, rootId: "project-root",
+        tool: "write_file",
+        arguments: { path: "project/delayed-prepare.txt", content: "must-not-run", expectedSha256: null },
+      })).rejects.toThrow("cancellation was requested");
+      expect(sent).toBe(1);
+      releaseSend();
+      await drained;
+      // Let the queued grant admission run after the cancellation send has drained.
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(sent).toBe(2);
+      expect(invocations).toBe(0);
+      expect(existsSync(target)).toBe(false);
+    } finally {
+      releaseSend();
+      client.close();
+      endpoint.close();
+    }
+  });
+
   test("a timed-out mutation queued behind a command is cancelled before dequeue", async () => {
     const state = fixture();
     const account = generateRemoteControlIdentityKeyPair();
