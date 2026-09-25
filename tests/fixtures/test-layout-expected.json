@@ -9,6 +9,7 @@
   "standalone-service.test.ts": "service",
   "standalone.test.ts": "lib",
   "worker-embed.test.ts": "lib",
+  "worker-embed-coverage.test.ts": "lib",
   "server-combo-held-response.test.ts": "server",
   "key-attribution.test.ts": "usage",
   "jev-stats.test.ts": "usage",
