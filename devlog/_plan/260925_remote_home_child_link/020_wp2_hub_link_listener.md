@@ -320,3 +320,33 @@ supervisor stop slot을 listener보다 앞에 실행한 뒤 이 socket과 Claude
 - BLOCKER 4: `linkRouteAllowed` 첫 단계에서 모든 `Upgrade` 헤더를 거부하고 websocket 및 임의 upgrade 값의 404 회귀 테스트를 추가했다.
 - BLOCKER 6 wp2: `ensureStarted(): Promise<void>` single-flight와 bind 후 idempotence, 마지막 link 삭제 직후 `close()`, wp4 supervisor가 나중에 등록해도 먼저 멈추는 optional-listeners stop slot을 명시했다.
 - K6/K14에 맞춰 field chain, lifecycle 순서, 테스트 표, `structure/runtime.md` 반영 문구의 기존 모호성을 제거했다. `003_decisions.md`와의 남은 불일치는 없다.
+
+## wp2 P 재검증 (아키텍트 Bacon, gpt-6-sol high, 2026-09-25)
+
+| ID | 제안 | 처분 |
+|---|---|---|
+| W2-1 | 앵커와 before 스니펫 현재 코드와 일치, wp1 API 일치 | 유지 |
+| W2-2 | `/readyz`는 현재 인증 없이 응답(serve-options.ts:592-627). 링크 입구만 GET 게이트 뒤, readiness 반환 전에 `resolveApiAuth(req, policy)` 추가. HEAD /readyz 404 유지(K8) | 수용. 테스트: 키 없음 401, 다른 키 401, 기록된 키는 인증을 통과해 기존 readiness 의미대로 200 또는 503(pending/failed, serve-options.ts:608-626)을 받는다 |
+| W2-3 | 일반 경로는 policy로 해석(serve-options.ts:536,678,774,839,1257,1294,1316,1352,1379,1404,1470,1489,1521,1581,1629; 구현 체크리스트로 유지). 직접 소비자 audio-upstream, audio-client, hub-usage 두 호출 모두에 링크 제한 전달 | 수용 |
+| W2-4 | serve-options.ts:1871이 GUI 제공에 `isApiAuthRequired(config)`를 넘긴다. 허용 목록 게이트가 모든 분기보다 앞서 있어야만 도달 불가 | 수용: 그 인자를 `policy`로 바꾸고 `/`와 GUI 경로 404 테스트 추가 |
+| W2-5 | 동기 구간 검사(tests/lab/core-lab-boundary.test.ts:1010-1025)의 수신자 호출 허용 목록에 `optionalListeners.start()` 없음 | 수용: 허용 목록에 추가, start 구현이 동기임을 테스트로 고정 |
+| W2-6 | index.ts 순증 0 주장은 근거 부족(현재 890, 상한 893) | 수용: 최종 줄 수를 재서 893 이하 확인. 넘으면 배선을 optional-listeners.ts로 옮긴다 |
+| W2-7 | structure/runtime.md:260-263의 "선택 리스너 바인드 실패 시 앞선 소켓 롤백" 문장이 K5와 충돌 | 수용: hub-link는 경고 + failed{bind}로 남고 공용 리스너는 유지된다고 고친다 |
+- 반영 확인(Bacon): ALIGNED. 남은 틈 2개(W2-3 전체 줄 목록, W2-2 readiness 상태 허용)를 위 표에 반영.
+
+## 감사 반영 (Gibbs FAIL r1, wp2 계획 감사)
+
+1. 조기 링크 인증 게이트 (차단 1). `serve-options.ts`에서 `ingress === "hub-link"`이면 경로 게이트(`linkRouteAllowed`)와 `policy = linkPolicy()` 생성 직후, 패키지 트리 검사(현재 :348-380), OPTIONS(:383-400), 드레인 응답, readiness보다 먼저 `resolveApiAuth(req, policy)`(기존 두 인자 서명, policy는 `linkIngress`를 가진 링크 정책)를 실행하고 실패하면 401을 반환한다. 이후의 모든 기존 resolver 호출(:536,678,774,839,1257,1294,1316,1352,1379,1404,1470,1489,1521,1581,1629와 직접 소비자)은 그대로 링크 제한을 받는다(경합 대비 이중 검사). W2-2의 `/readyz` 전용 검사는 이 게이트로 대체되지만, readiness 응답 의미(200/503)는 유지.
+2. 자격 증명 거부 행렬 (차단 2). `tests/server/link-listener-admission.test.ts`에서 실제 Bun.serve 링크 리스너(127.0.0.1:0, 임시 OPENCODEX_HOME, links.json에 id 하나)에 요청한다. 경로: `POST /v1/responses`, `POST /v1/chat/completions`, `POST /v1/messages`, `POST /v1/messages/count_tokens`, `GET /v1/models`, `POST /v1/images/generations`, 이미지·아티팩트·컨텍스트·검색 경로(현재 loopbackRouteAllowed 허용 집합 중 링크 허용 집합에 포함되는 것 전부, 구현 시 배열로 고정), `POST /v1/audio/transcriptions`, 라이브 오디오 캐리어, `GET /v1/usage`(hub-usage 두 검사). 자격 증명 4종: (a) OPENCODEX_API_AUTH_TOKEN 환경 변수 값, (b) links.json에 없는 활성 apiKeys 키, (c) pendingRotation 키, (d) links.json에 있는 키. (a)(b)(c)는 전부 401, (d)는 401이 아님(핸들러 도달: 업스트림 없는 설정에서 핸들러 고유 오류 코드로 판별). 추가로 모든 경로에 `Upgrade: websocket`, `Upgrade: h2c` → 거부, `/`, `/dashboard`, `/api/config`, `/opencodex-session` → 404, `HEAD /readyz` → 404, `HEAD /v1/catalog`(키 포함) → 200.
+3. 실패·경합 (차단 3). `tests/server/link-listener-lifecycle.test.ts`: (i) 점유된 포트로 첫 바인드 실패 → 상태 failed{bind}, 공용 리스너 `/healthz` 200 유지; (ii) `writeLinkStore`를 주입 가능한 의존성으로 만들어 listenerPort 저장 실패를 일으키면 링크 소켓이 닫히고 상태 failed{bind}, 공용 리스너 유지; (iii) 동시 `ensureStarted()` 두 번이 같은 Promise 객체를 반환(`toBe`); (iv) `close()` 진행 중 `ensureStarted()` 호출 → close 완료 전에는 재바인드하지 않고, close 뒤 새 호출에서만 바인드; (v) 마지막 링크 삭제 후 `close()` → 즉시 연결 거부.
+4. 동기 구간 (차단 4). `tests/lab/core-lab-boundary.test.ts`의 수신자 허용 목록에 `optionalListeners.start`를 추가하고, 같은 파일에 소스 검사를 추가한다: `src/server/index/optional-listeners.ts`의 `start`와 `src/server/index/link-listener.ts`의 첫 바인드 경로 함수 선언이 `async`가 아니고 본문에 최상위 `await`가 없음을 기존 스캐너(주석·문자열·중첩 함수 무시)로 확인한다. 동적 import는 `ensureStarted` 경로에만 허용.
+5. 비차단: index.ts 줄 수와 structure/layout 게이트는 B 끝에서 추적 파일 기준으로 다시 잰다.
+
+
+## 감사 반영 (Gibbs FAIL r2) — 위 r1 반영 절을 다음처럼 확정한다
+
+1. 호출 모양(본문 "auth-cors.ts, audio, usage MODIFY" 절의 계약을 그대로 따른다): 조기 게이트는 `resolveApiAuth(req, policy)` 두 인자로 호출하고, 링크 제한은 `RequestPolicyView.linkIngress: { allowedKeyIds }`가 들고 간다. `resolveApiAuth`/`resolveResponsesApiAuth`는 그것을 `resolveDataPlaneAdmissionSecret(token, config, source, { linkIngress: policy.linkIngress?.allowedKeyIds })`의 네 번째 인자 `DataPlaneAdmissionOptions`로 넘긴다. 직접 소비자는 `config`만 받던 서명에 선택 인자 `options: DataPlaneAdmissionOptions = {}`를 추가하고(`resolveAudioAdmission(headers, config, options)`, audio-client의 해당 함수, `handleHubUsage`의 두 resolver 호출), `serve-options.ts`의 각 호출 지점이 링크 입구일 때 `{ linkIngress: policy.linkIngress?.allowedKeyIds }`를 전달한다. 옵션이 없으면 기존 동작과 같다. r1 절과 이전 판의 `linkAdmission`·세 번째 인자 표기는 폐기한다.
+2. 테스트 파일과 등록: 새 테스트는 `tests/server/link-listener-admission.test.ts`, `tests/server/link-listener-lifecycle.test.ts`, `tests/lab/core-link-boundary.test.ts` 세 개. 앞의 둘은 `scripts/test-layout/layout.json` explicit와 `tests/fixtures/test-layout-expected.json`에 "server"로, 셋째는 "lab"으로 등록(파일명이 lab 도메인 `^core-` 정규식과 맞으므로 explicit 없이도 배치되지만 명시 등록). 파일 변경 지도에 이 세 파일을 추가한 것으로 본다. 경로 행렬에 `GET /v1/catalog`, `GET /v1/hub-state`, `POST /v1/responses/compact`, `POST /v1/realtime/calls`를 추가하고, `GET /readyz`는 키 없음 401·다른 키 401·링크 키 200 또는 503을 확인한다.
+3. 주입 지점: `createLinkListenerLifecycle(deps: LinkListenerDeps = {})`, `interface LinkListenerDeps { storePath?: string; readStore?: (path: string) => LinkStore; writeStore?: (path: string, store: LinkStore) => void; serve?: (options: Parameters<typeof Bun.serve>[0]) => Server; warn?: (message: string) => void }`. 기본값은 `linkStorePath()`, `readLinkStore`, `writeLinkStore`, `Bun.serve`, `console.warn`. 테스트는 writeStore에서 throw, serve에서 EADDRINUSE를 주입한다. optional-listeners는 이 deps를 그대로 넘기는 선택 인자를 받는다.
+4. 동기 검사: 스캐너가 대상 파일에서 `start`를 다음 세 형태 모두로 찾는다: 메서드 단축형(`start(...) {`), 속성(`start: (...) =>`, `start: function`), 선언(`function start`). 찾은 모든 정의에서 `async` 수식어가 없고, 본문 최상위(중첩 함수·주석·문자열 제외)에 `await`가 없음을 확인한다. 정의를 하나도 못 찾으면 실패(공허한 통과 방지). 대상은 `src/server/index/optional-listeners.ts`와 `src/server/index/link-listener.ts`.
+
