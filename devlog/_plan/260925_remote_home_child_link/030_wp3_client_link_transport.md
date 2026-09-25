@@ -378,3 +378,40 @@ structure/manifest.json은 이미 source directory ownership을 충족하므로 
 - K7 검증: port 0 stub listener 기준 missing-key 401, wrong-key 401, correct service-token key 경로를 세 endpoint에 추가했다.
 - K9: `relayLinkDataRequest` 자체도 Upgrade를 upstream fetch 없이 404로 거부하도록 고정해 HTTP-only 경계를 유지했다.
 - K17: stale한 locale 수 표기를 `gui/src/i18n/shared.ts:6-17`의 실제 10개 locale로 고쳤다.
+
+## wp3 P 재검증 (아키텍트 Laplace, gpt-6-sol high, 2026-09-25)
+
+| ID | 제안 | 처분 |
+|---|---|---|
+| W3-1 | 타입·스키마 위치 유지(src/types/config.ts:400-435, leaf-validators.ts:853-893). diagnostics.ts:261-269, load-degrade.ts:658-665, state.ts:81-112는 스키마를 그대로 소비하므로 코드 변경 없이 검증 지점으로 기록 | 수용 |
+| W3-2 | 필드 체인에 pending 복구(connect.ts:343-356), 사용량(cli/observe.ts:193), Desktop 모델 조회(cli/claude-desktop.ts:241-259), hub-state(client/hub-state.ts:210), status·캐시 소비자 추가. 카탈로그·상태·사용량·모델 헬퍼는 이미 `x-opencodex-api-key`를 보냄(hub-client.ts:435-447,528-537,597-615) → readiness만 새 옵션 필요. 키 제로화 유지(connect.ts:179-180은 Uint8Array만 처리) | 수용. stdin으로 받은 키도 Uint8Array로 보관하고 같은 정리 경로를 탄다 |
+| W3-3 | wp2 보안 계약 인용 갱신(link-listener.ts:54-72, serve-options.ts:312-353, auth-cors.ts:571-581) | 수용 |
+| W3-4 | K9 근거 수정: WebSocket 여부는 plan.ts:243,302,361의 `websocketsEnabled(config)` | 수용: link 대상이면 전역 설정과 무관하게 websocket을 끈다. 테스트: 전역 websocket 켠 설정에서도 link 주입 결과는 꺼짐 |
+| W3-5 | runtime.ts:88-100의 임시 포트 대체 때문에 바인드 포트가 config.port와 다를 수 있음 | 수용: 라우팅 대상은 `http://localhost:<config.port>`. `config.port`가 0 또는 유효하지 않으면 `connect --link`는 거부(링크는 고정 포트가 필요). 테스트는 라우팅 포트를 주입하는 seam으로 검증하고, 어떤 경로도 `localhost:0`을 만들지 않음을 테스트 |
+| W3-6 | status 링크 메타데이터 위치 갱신(cli/connect.ts:69-93,170-213). K16 허브 상태는 wp4 | 수용 |
+| W3-7 | 새 테스트 4개 배치 등록 필요, 대상 파일에 크기 상한 없음 | 수용 |
+
+- 반영 확인(Laplace): MISALIGNED 3건을 다음과 같이 확정.
+  - W3-2: 필드 체인에 `fetchHubUsage` 헬퍼(src/client/hub-client.ts:484-498) 추가. status·캐시 소비자는 구현 시 `rg -n "client\\?\\.(serverUrl|managementUrl|managementTransport)|OcxClientConnectionConfig"` 결과 전부를 체크리스트로 PR 설명에 나열.
+  - W3-3: `/v1/responses`는 별도 resolver(src/server/auth-cors.ts:598-611, resolveResponsesApiAuth)를 쓴다. wp3 통합 테스트는 relay를 거친 `POST /v1/responses`가 링크 키로 허용되고 키 없이는 401임을 확인한다.
+  - W3-5: link 모드의 machine listener는 `config.port`에만 바인드한다. runtime.ts:88-93의 임시 포트 대체는 link 모드에서 끄고, 포트가 사용 중이면 "link mode needs port N; free it or change port" 오류로 시작에 실패한다. 테스트: 포트 점유 시 link 모드 시작 실패, hub 모드에서는 기존 대체 유지.
+
+## 감사 반영 (Leibniz FAIL r1, wp3 계획 감사) — 이 절이 앞선 내용보다 우선한다
+
+1. 키 수명: 발급된 데이터 키는 기존 hub connect 경로와 똑같이 문자열로 다룬다(기존 `issued.key`도 문자열, src/client/connect.ts:539-547). 바이트 제로화는 기존 코드가 지우던 관리자·페어링 자격 증명(connect.ts:179-180)에만 적용된다. 앞 절의 "stdin 키를 Uint8Array로 보관" 표기는 폐기. 추가 규칙: stdin은 `Bun.stdin`에서 최대 4 KiB만 읽고, 형식은 JSON `{"apiKeyId": string, "key": "ocx_data_[0-9a-f]{40}"}` 한 개. 키 값은 로그·오류 메시지·config·journal에 쓰지 않고 서비스 토큰 파일에만 쓴다. 오류 메시지에는 키 대신 "invalid link credential"만 쓴다. 테스트: 잘못된 입력의 오류 문자열에 키가 없음.
+2. 기존 서비스 토큰: link connect는 hub connect와 같은 선행 조건을 따른다. 서비스 토큰 파일이 이미 있으면 거부한다(service-secrets.ts:149의 동작 유지). 앞 절의 "기존 토큰 복원" 주장은 폐기. 해제 시 토큰 삭제는 기존 disconnect(connect.ts:898) 그대로. S4 "해제 후 연결 전과 같다"는 연결 전에 토큰이 없던 상태 기준이다.
+3. 중계 경로: `linkRouteAllowed`를 `src/server/index/link-listener.ts`에서 순수 모듈 `src/link/routes.ts`로 옮기고(export 이름 유지, link-listener는 re-import), machine listener 중계도 같은 함수로 경로·메서드를 판정한다. 목록 밖 `/v1/*`는 404. 테스트: 두 입구가 같은 표를 쓰는지 표 기반으로 확인.
+4. 헤더·본문: `src/client/hub-relay.ts`의 hop-by-hop 제거와 `Connection`이 지명한 헤더 제거(:48), transfer-encoding/content-length 검증(:111), 본문 상한(:163)을 재사용한다(필요하면 해당 헬퍼를 export). 링크 중계는 요청 본문 상한을 machine listener의 `maxRequestBodySize`와 같게 두고, 응답은 스트리밍으로 그대로 흘린다(SSE 유지). 테스트: Connection으로 지명된 헤더 제거, TE+CL 동시 요청 거부, 상한 초과 413.
+5. WebSocket: `src/codex/inject/plan.ts`의 세 호출(:243,302,361)에 대상별 덮어쓰기를 넣는다. 라우팅 대상이 link 모드이면 `websocketsEnabled(config)` 대신 false. 테스트: 전역 websocket을 켠 설정에서 link 주입 결과가 꺼짐.
+6. 고정 포트: 파일 변경 지도에 `src/client/runtime.ts` MODIFY 추가. link 모드이면 :88-93의 임시 포트 대체를 끄고, 설정 포트가 사용 중이면 "link mode needs port N" 오류로 시작 실패. 테스트: 실제 소켓으로 포트를 점유한 채 link 모드 시작이 실패하고, hub 모드에서는 기존 대체가 유지됨.
+7. 비차단 반영: `link.tunnelPort`는 1024-65535만 허용(80·443 등 origin 정규화 문제 회피). 사용량·Desktop 모델·hub-state·캐시 소비자에 대해 link 모드에서 기존 origin(`http://127.0.0.1:P`)이 그대로 쓰이는지 단위 테스트로 확인. `startMachineListener`를 실제 Bun 소켓으로 띄우고, 가짜 허브 링크 리스너(127.0.0.1 임의 포트)까지 `POST /v1/responses`가 중계되는 종단 테스트 1개 이상.
+8. 새 테스트 파일 이름과 등록: `tests/clients/client-link-connect.test.ts`, `tests/clients/client-link-relay.test.ts`, `tests/clients/client-link-runtime.test.ts`, `tests/codex-integration/injection-link-websocket.test.ts`(각 도메인 정규식 확인 후 explicit 등록), `src/link/routes.ts` 이동에 따른 `tests/clients/link-routes.test.ts`.
+
+
+## 감사 반영 (Leibniz FAIL r2) — 이 절이 앞선 모든 내용보다 우선한다
+
+1. 보안 요구 변경(메인 결정, 003 K18로 기록): link 데이터 키의 메모리 제로화는 요구하지 않는다. 근거: JS 문자열은 지울 수 없고, 이 키는 장기 비밀로 서비스 토큰 파일(0600)에 저장되며 기존 hub connect도 같은 키를 문자열로 다룬다. 대신 강제하는 규칙: stdin 4 KiB 상한, 키 값이 로그·오류 메시지·config·journal·status 출력에 나타나지 않음(테스트로 고정), 파싱 직후 원본 입력 버퍼(Uint8Array)는 0으로 채움.
+2. 앞 절 테스트 목록의 "기존 서비스 토큰 복원" 시나리오는 "서비스 토큰 파일이 이미 있으면 link connect가 파일을 건드리지 않고 거부"로 대체한다.
+3. 응답 처리: `text/event-stream`이 아닌 응답은 hub-relay의 응답 상한과 비활성 제한(src/client/hub-relay.ts:163, :294)을 그대로 쓴다. SSE 응답은 추론 스트림이 길 수 있으므로 총량 상한 없이 흘리되, (a) 호출자 연결이 끊기면 `req.signal`로 업스트림 fetch를 취소하고, (b) 300초 동안 한 바이트도 오지 않으면 업스트림을 취소하고 스트림을 닫는다. 테스트: SSE 호출자 중단 시 가짜 허브가 연결 종료를 관찰, 비SSE 상한 초과 시 502/413 동작은 hub-relay와 같음, 무활동 타이머는 주입 가능한 시계로 검증.
+4. 테스트 목록은 r1 절 8번의 다섯 파일이 최종이다. 앞 절의 네 파일 표기는 폐기.
+
