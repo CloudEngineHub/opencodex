@@ -1188,7 +1188,7 @@ export type OcxAccountPoolRotationStrategy = "quota" | "round-robin" | "fill-fir
 
 export type OcxAccountPoolQuotaWindow = "five-hour" | "weekly" | "max-utilization";
 
-export type OcxComboStrategy = "failover" | "round-robin" | "random" | "least-used" | "reset-window";
+export type OcxComboStrategy = "failover" | "round-robin" | "random" | "least-used" | "reset-window" | "jev";
 export type OcxComboDefaultEffort = "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 export type OcxComboDefaultEffortMode = "fallback" | "force";
 
@@ -1213,6 +1213,11 @@ export interface OcxComboTarget {
   model: string;
   /** Relative target weight for round-robin batches and random selection. Default 1; valid range 1..10000. */
   weight?: number;
+  /**
+   * Exact efforts JEV may choose for this target. Omit to allow every effort the
+   * target currently advertises; an explicit list must be non-empty.
+   */
+  reasoningEfforts?: OcxComboDefaultEffort[];
   /**
    * Marks an emergency-only target. Inert unless the combo sets
    * `cooldownWaitPolicy`, and never makes a target permanently ineligible —
