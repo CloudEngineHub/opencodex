@@ -207,6 +207,60 @@ describe("native Chat candidates in a combo", () => {
     });
   });
 
+  test("Chat reasoning intent survives an empty-ladder first target and reaches failover", async () => {
+    const a = upstream(() => Response.json({ error: { message: "fixture outage" } }, { status: 503 }));
+    const b = upstream(() => responsesStream("reasoned fallback"));
+    const config = comboConfig(
+      {
+        a: provider("openai-responses", a.baseUrl, { reasoningEfforts: [] }),
+        b: provider("openai-responses", b.baseUrl, { reasoningEfforts: ["low", "high"] }),
+      },
+      [{ provider: "a", model: "m1" }, { provider: "b", model: "m2" }],
+    );
+
+    const { response, text } = await send(config, { stream: false, reasoning_effort: "high" });
+
+    expect(response.status).toBe(200);
+    expect(text).toContain("reasoned fallback");
+    expect(a.bodies).toHaveLength(3);
+    for (const body of a.bodies) {
+      expect((body.reasoning as Rec | undefined)?.effort).toBeUndefined();
+    }
+    expect(b.bodies).toHaveLength(1);
+    expect((b.bodies[0]!.reasoning as Rec | undefined)?.effort).toBe("high");
+  });
+
+  test("Chat policy fallback strips only the empty-ladder attempt's reasoning effort", async () => {
+    const a = upstream(() => Response.json({ error: { message: "fixture outage" } }, { status: 503 }));
+    const b = upstream(() => responsesStream("reasoned policy fallback"));
+    const config: OcxConfig = {
+      port: 0,
+      defaultProvider: "a",
+      providers: {
+        // Anthropic consumes parsed options rather than the Responses raw-body
+        // sanitizer, so this catches an effort that leaks past policy selection.
+        a: provider("anthropic", a.baseUrl, { models: ["m1"], reasoningEfforts: [] }),
+        b: provider("openai-responses", b.baseUrl, { models: ["m2"], reasoningEfforts: ["low", "high"] }),
+      },
+      routingProfiles: { daily: { candidates: [{ provider: "a", model: "m1" }, { provider: "b", model: "m2" }] } },
+    };
+
+    const { response, text, rows } = await send(config, {
+      model: "policy/daily", stream: false, reasoning_effort: "high", include_reasoning: true,
+    });
+
+    expect(response.status).toBe(200);
+    expect(text).toContain("reasoned policy fallback");
+    expect(a.bodies.length).toBeGreaterThan(0);
+    for (const body of a.bodies) {
+      expect(body.thinking).toBeUndefined();
+      expect(body.output_config).toBeUndefined();
+    }
+    expect(b.bodies).toHaveLength(1);
+    expect(b.bodies[0]!.reasoning).toMatchObject({ effort: "high", summary: "auto" });
+    expect(rows[0]!.attempts?.map(attempt => attempt.status)).toEqual([503, 200]);
+  });
+
   test("a streamed native answer that fails after output is not re-sent to the next target", async () => {
     const a = upstream(() => chatErrorStream("fixture broke mid-stream", "partial answer"));
     const b = upstream(() => responsesStream("must not run"));
