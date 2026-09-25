@@ -68,12 +68,14 @@ const compileArgs = [process.execPath, "build", "--compile"];
 // launch; only pass --target when it differs from the host.
 if (target !== hostTarget()) compileArgs.push("--target", target);
 compileArgs.push(join(repoRoot, "src", "cli", "index.ts"), "--outfile", executable);
+// process.exit() skips `finally`, so exit only after the placeholder is back.
+let compileExitCode: number;
 try {
-  const result = Bun.spawnSync(compileArgs, { stdout: "inherit", stderr: "inherit" });
-  if (result.exitCode !== 0) process.exit(result.exitCode);
+  compileExitCode = Bun.spawnSync(compileArgs, { stdout: "inherit", stderr: "inherit" }).exitCode ?? 1;
 } finally {
   restoreGenPlaceholder();
 }
+if (compileExitCode !== 0) process.exit(compileExitCode);
 
 // bun's ad-hoc linker signature does not always cover the embedded payload;
 // macOS kills the executable on launch (SIGKILL) unless it is re-signed.
