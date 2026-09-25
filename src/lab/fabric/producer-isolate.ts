@@ -107,9 +107,9 @@ export function isUnconfirmedProducerTermination(error: unknown): boolean {
 
 /**
  * The release signal attached to an unconfirmed-termination rejection: resolves
- * once every still-open inherited stdio pipe reports its natural close, meaning
- * no descendant can still hold scratch open. Undefined when nothing monitorable
- * remained — callers must then rely on the deferred-cleanup sweep.
+ * once every monitored inherited stdio pipe reports its natural close. This is
+ * observation only: closing a pipe does not prove a descendant exited and must
+ * not authorize deletion. Undefined when nothing monitorable remained.
  */
 export function producerTerminationSignal(error: unknown): Promise<void> | undefined {
   if (!error || typeof error !== "object") return undefined;
@@ -153,8 +153,8 @@ export async function runIsolatedFabricProducer(request: IsolateRequest): Promis
     let reapTimer: ReturnType<typeof setTimeout> | undefined;
     let killWatchdog: ReturnType<typeof setTimeout> | undefined;
     // Resolves once every still-open inherited stdio pipe reports its natural
-    // close — the only durable signal that no descendant can still write
-    // scratch. Undefined when no open pipe can be monitored.
+    // close. This is not a writer-termination proof or scratch deletion lease.
+    // Undefined when no open pipe can be monitored.
     let stdioReleaseSignal: Promise<void> | undefined;
 
     // Keep monitorable pipes open but unref'd so they never extend process
@@ -389,8 +389,8 @@ export async function runIsolatedFabricProducer(request: IsolateRequest): Promis
           "harness",
         ) as FabricTaskError & { unconfirmedTermination?: boolean; stdioRelease?: Promise<void> };
         // A descendant holding an inherited pipe can still use scratch after
-        // the direct child exited, so the caller must defer cleanup until the
-        // pipes actually close — same contract as an unconfirmed kill.
+        // the direct child exited, so the caller must retain scratch for manual
+        // review — pipe closure alone cannot prove a descendant terminated.
         failure.unconfirmedTermination = true;
         failure.stdioRelease = stdioReleaseSignal;
         finish(() => reject(failure));

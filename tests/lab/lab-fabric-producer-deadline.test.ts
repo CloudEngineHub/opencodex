@@ -1,7 +1,7 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import * as childProcess from "node:child_process";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -11,7 +11,7 @@ import { isUnconfirmedProducerTermination } from "../../src/lab/fabric/producer-
 import type { IsolatedProducerResult } from "../../src/lab/fabric/producer-protocol";
 import { FabricTaskError, type FabricTaskRunResult, type SyntheticPatchV1 } from "../../src/lab/fabric/types";
 import { runFabricSyntheticPatchTaskForRoute } from "../../src/lab/fabric/executor";
-import { sweepDeferredScratch } from "../../src/lab/fabric/scratch";
+import { createSyntheticScratch } from "../../src/lab/fabric/scratch";
 import { createLabDestination } from "../../src/lab/live/destination";
 import { fabricCorrectPatchExecutor, fabricMockRoute } from "../helpers/fabric-task-test";
 
@@ -618,9 +618,12 @@ test("trusted route keeps scratch until stderr-failed child closes, then cleans 
   }
 });
 
-test("trusted route defers scratch when exit arrives but close never does", async () => {
+for (const marker of ["absent", "regular", "symlink", "directory"] as const) {
+test.skipIf(process.platform === "win32" && marker === "symlink")(`unconfirmed producer retains scratch and preserves ${marker} marker paths`, async () => {
   const configDir = mkdtempSync(join(tmpdir(), "ocx-fabric-consumer-defer-"));
   const child = new DeadlineChild();
+  Object.assign(child.stdout, { unref() {} });
+  Object.assign(child.stderr, { unref() {} });
   const originals = { spawn: childProcess.spawn, set: globalThis.setTimeout, clear: globalThis.clearTimeout };
   const restorers: Array<() => void> = [];
   const proxyNames = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"];
@@ -648,6 +651,18 @@ test("trusted route defers scratch when exit arrives but close never does", asyn
     expect(existsSync(scratchRoot)).toBe(true);
     await drain();
 
+    const markerPath = join(scratchRoot, ".ocx-deferred-cleanup");
+    const external = join(configDir, "outside.txt");
+    writeFileSync(external, "preserve outside bytes\n");
+    if (marker === "regular") {
+      writeFileSync(markerPath, "producer-owned marker\n");
+      utimesSync(markerPath, 0, 0);
+    } else if (marker === "symlink") {
+      symlinkSync(external, markerPath);
+    } else if (marker === "directory") {
+      mkdirSync(markerPath);
+    }
+
     // The producer exits cleanly but a descendant keeps the inherited pipes
     // open, so close never arrives and the drain bound expires.
     child.exit(0);
@@ -663,15 +678,21 @@ test("trusted route defers scratch when exit arrives but close never does", asyn
       },
     });
 
-    // Termination is unconfirmed: scratch must survive removal while a
-    // descendant could still write it, marked so a later run sweeps it even
-    // if this process exits first.
     expect(existsSync(scratchRoot)).toBe(true);
-    expect(existsSync(join(scratchRoot, ".ocx-deferred-cleanup"))).toBe(true);
-
-    // The next task's sweep removes the marked tree once its marker ages out.
-    sweepDeferredScratch(configDir, 0);
-    expect(existsSync(scratchRoot)).toBe(false);
+    expect(readFileSync(external, "utf8")).toBe("preserve outside bytes\n");
+    if (marker === "absent") expect(existsSync(markerPath)).toBe(false);
+    if (marker === "symlink") expect(lstatSync(markerPath).isSymbolicLink()).toBe(true);
+    if (marker === "regular") expect(readFileSync(markerPath, "utf8")).toBe("producer-owned marker\n");
+    // A later task cannot use even an epoch-old marker as permission to delete.
+    const next = createSyntheticScratch(configDir);
+    next.cleanup();
+    expect(existsSync(scratchRoot)).toBe(true);
+    // Closing inherited pipes does not establish that the writer has exited.
+    child.close();
+    child.stdout.destroy(); child.stderr.destroy();
+    await drain();
+    expect(existsSync(scratchRoot)).toBe(true);
+    expect(readFileSync(join(scratchRoot, "src/value.txt"), "utf8")).toBe("before\n");
   } finally {
     try {
       child.close();
@@ -690,3 +711,5 @@ test("trusted route defers scratch when exit arrives but close never does", asyn
     }
   }
 });
+
+}

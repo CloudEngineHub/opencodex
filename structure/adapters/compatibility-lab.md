@@ -152,10 +152,11 @@ simply that drainage stalled, so the result cannot be trusted and its scratch
 cannot be cleaned while reporting success under a possibly-live process.
 Rejections that could not observe `close` — a kill that produced neither `exit`
 nor `close`, and any `exit` whose `close` never arrived — carry the deferred-
-cleanup contract of an unconfirmed kill: the executor marks the scratch tree
-with `.ocx-deferred-cleanup` instead of removing it, removes it once every
-inherited pipe has closed, and the next task sweeps a marker older than the
-sweep age bound even if this process exits first.
+cleanup contract of an unconfirmed kill: the executor retains scratch and emits a fixed
+manual-review warning without writing into producer-controlled paths. Later task creation
+never sweeps these trees. Marker age and inherited-pipe closure are not termination leases.
+After independently confirming all producer/descendant processes stopped, the operator may
+review and remove the exact retained tree; parent exit does not grant automatic cleanup.
 
 ## Scope guard
 
