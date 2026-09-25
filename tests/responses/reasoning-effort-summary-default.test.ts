@@ -120,8 +120,12 @@ describe("reasoning effort preserves visible thinking when summary is omitted", 
         b: { adapter: "anthropic", baseUrl: "https://b.example.test/v1", reasoningEfforts: ["low", "high"] },
       },
     };
-    const parsed = parseRequest({ model: "a/test-model", input: [], reasoning: { effort: "high", summary: "auto" } });
     for (const [provider, expectedEffort] of [["a", undefined], ["b", "high"]] as const) {
+      // Policy fallback parses each attempt from its preserved wire snapshot. Keep these
+      // cases independent so the empty-ladder mutation cannot manufacture the capable result.
+      const parsed = parseRequest({
+        model: `${provider}/test-model`, input: [], reasoning: { effort: "high", summary: "auto" },
+      });
       const route = routeModel(config, `${provider}/test-model`);
       await applyFinalRouteRequestNormalization({
         parsed, route, config,
