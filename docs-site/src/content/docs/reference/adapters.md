@@ -34,7 +34,7 @@ and image order are preserved; image detail `original` maps to `high`.
 Empty content, malformed or opaque parts, file-id-only images and partial envelopes
 remain invalid. Ordinary function/custom tool results still require a nonempty
 `call_id`. The envelope metadata identifies a compatibility shape and grants no
-additional permissions. Native passthrough and compaction retain their raw-body rules.
+additional permissions. Native passthrough and routed (portable) compaction apply the same user-turn mapping to their raw bodies; the direct native `/responses/compact` forward keeps its existing raw-body rules.
 
 ## `openai-chat`
 
@@ -292,6 +292,10 @@ MiMo model Command Code serves.
 - Always sends `anthropic-version: 2023-06-01`. Streams `content_block_delta` (`text_delta`,
   `thinking_delta`, compatible `reasoning_delta`, `input_json_delta`). The SSE decoder preserves
   event state across fetch chunks and accepts a terminal `message_stop` without a trailing newline.
+  At `message_stop`, the translated stream emits its terminal outcome and ends without waiting for
+  upstream EOF. Later pings or comments do not turn that completed message into a web-search stream
+  error. Pings and comments before `message_stop` still keep long thinking turns alive; refusals
+  remain non-retryable incomplete outcomes and upstream error stop reasons remain failures.
 - For routed Anthropic Responses turns with client tools, a bounded terminal guard detects the
   high-confidence case where the user requested an action but Claude ends with an execution claim
   and no tool call. It performs at most one internal continuation; normal answers, clarification

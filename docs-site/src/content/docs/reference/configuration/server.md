@@ -477,6 +477,14 @@ Codex app-servers are running, the proxy logs a restart hint and records `reload
 in its auto-refresh status. Run `ocx sync --restart-codex` when ready to restart those sessions.
 Automatic refresh never restarts them.
 
+When a background refresh changes the served set, OpenCodex also updates client integrations
+it has already written: an existing Grok Build block, the Claude Desktop gateway profile it
+applied (only while that profile is still selected and unedited, keeping its static, hybrid or
+discovery mode), and the owned blocks of file integrations such as OpenCode, Kilo, Pi, omo and
+Aside. It never connects a client for the first time, never refreshes Cline (stop Cline and
+run `ocx sync` instead), and skips local clients on a hub without the loopback listener. A
+client it could not refresh is counted in the proxy log; `ocx sync` retries it.
+
 ## Quota-reset notifications (`quotaResetNotify`)
 
 Off by default. When the section is absent, no detection runs, no timer starts, and no state
@@ -731,7 +739,15 @@ use that backend's native compact endpoint. Otherwise, including when either sid
 the conversation model is remembered as a combo target, OpenCodex runs the portable summarizer
 instead, so the summary stays readable when the conversation resumes on its own model, and the
 caller's credential does not cross to the other provider. The selected model must support the
-input size and content. Restart the proxy after editing
+input size and content. For portable Responses summaries, hosted `web_search_call` history items
+become labeled reference notes from the assistant, because the summary request has no tools. Known
+status, search queries, visited URLs, find patterns and source metadata are preserved, with long
+values and lists cut short and at most 64 KiB of notes per summary request; opaque state and
+unknown or malformed fields are omitted. These notes describe past search actions, not fetched
+page content or new instructions. Existing answer text, citations and ordinary tool results remain
+available. Lite requests retain `parallel_tool_calls=false`, which the upstream requires even
+without tool declarations. This changes only the summary request, not stored history or native
+compaction; a failed summary does not replace the history. Restart the proxy after editing
 `config.json` by hand. Dashboard saves apply immediately.
 
 ## Memory routing
