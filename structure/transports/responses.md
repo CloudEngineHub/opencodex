@@ -71,7 +71,7 @@ silence. It cannot observe the client's workspace or prove whether a successful 
 repository state. Consequently, the active-turn and session-lane gates are concurrency admission
 limits, the translator budget follows [live retained-byte ownership](byte-accounting.md#stream-buffer-accounting), the response-state caps are cache
 retention limits, and the stall watchdog is a silence limit. None is a cumulative continuation or
-semantic no-progress budget.
+semantic no-progress budget. The turn lease in `src/server/lifecycle.ts` subscribes to HTTP ingress cancellation, internal decision cancellation and every registered controller. Cancellation releases turn admission, session lanes, attached workflow leases and pending native-main selection ownership without waiting for upstream work. Live/Realtime acquisition binds ingress cancellation until WebSocket upgrade transfers ownership. Normal completion detaches the listeners; late finalizers remain idempotent.
 
 > Decision record: [ADR-0031](../decisions/ADR-0031-responses-http-sse.md)
 > Decision record: [ADR-0032](../decisions/ADR-0032-responses-http-sse.md)
@@ -416,7 +416,7 @@ is composed from the following owners in `src/server/responses/`; none is a gene
 | --- | --- |
 | `request-prepare.ts` | Body parsing, combo handoff, final route, encrypted-task recovery and initial admission, retaining [original policy authorization](policy-fallback.md). xAI OAuth model-scope admission previews the billed Fast lane using the serialization decision shared with Chat, Messages and routed compact admission; final normalization rechecks the actual wire destination. |
 | `shadow-target-availability.ts` | Shadow-call target resolution for `request-prepare.ts`: an unavailable target fails once with `409 intercept_target_unavailable` instead of reaching the native source model or the default provider. |
-| `request-transport.ts` | Live credential selection, dispatch bindings, adapter replacement and same-target request identity. |
+| `request-transport.ts` | Live credential selection, dispatch bindings, adapter replacement and same-target request identity. Copilot Auto renewal onto Chat (including negotiation-401 refresh) signals the native owner before inference; `passthrough-dispatch.ts` reuses its inference-401/429 adapter handoff so JSON and SSE retain the Responses envelope. |
 | `request-sidecar-auth.ts` | Routed-compaction image projection, sidecar credential resolution and vision preprocessing. |
 | `response-effects.ts` | Completion notification, replay publication and live request-tool aliases. |
 | `request-send-budget.ts` | Request-wide send accounting, remaining allowance, the pending recovery permit and the shared ambiguous-resend grant. |
@@ -583,7 +583,7 @@ caller passes `recordBufferedDelivery: false`, which the direct client encoders 
 count their own frames. `src/protocols/encoders/adapter-events.ts` ports the bridge's item state
 machine for those encoders, so a change to item boundaries, tool naming or terminal handling in
 `sse.ts` has to be made there too; the parity tests fail when the two diverge. `src/bridge/errors.ts` (`formatErrorResponse`) formats error responses and
-keeps only allowlisted transport verdict codes. Adapter error events take a different path:
+keeps only allowlisted transport verdict codes and the explicit local `spend_ledger_storage_unavailable` identity ([storage refusal contract](responses-spend.md#durable-spend-reservations)). Adapter error events take a different path:
 `src/bridge/internal.ts` preserves explicit verdicts except cyber-policy and known rate-limit mappings
 ([client retry advice](responses-wire-shapes.md#client-rate-limit-retry-advice)). The shared usage shaping's `input_tokens_details` and
 `output_tokens_details` are always emitted, with zero defaults, because strict Responses clients
