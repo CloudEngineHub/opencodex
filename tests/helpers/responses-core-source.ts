@@ -44,6 +44,10 @@ export const RESPONSES_CORE_MODULES = [
   // Reached from core-combo.ts: JEV effort choices and resolved native quota identity.
   "jev-combo-choice.ts",
   "request-prepare.ts",
+  // Reached from request-prepare.ts and compact.ts: the eager Codex MCP catalog diagnostic (#8133).
+  "codex-tool-catalog.ts",
+  // Reached from codex-tool-catalog.ts: the rendered Code Mode exec section parser.
+  "code-mode-collab-surface.ts",
   "turn-membership.ts",
   "policy-request-scope.ts",
   "skills-snapshot.ts",
@@ -98,6 +102,8 @@ export const RESPONSES_CORE_MODULES = [
   "adapter-delivery.ts",
   "anthropic-thinking-recovery.ts",
   "advisor-slot.ts",
+  // Reached from advisor-slot.ts: clips the opt-in question-only consultation text (#7526).
+  "advisor-question.ts",
   "advisor-retention.ts",
   "advisor-plan-slot.ts",
   "policy-refusal.ts",

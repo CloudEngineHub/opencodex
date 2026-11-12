@@ -322,9 +322,12 @@ relinked in between, the sync changes nothing and exits 5 with a JSON `phase` li
 ([04_failure_semantics.md](04_failure_semantics.md#a-pinned-sync-that-refuses-exit-5)).
 
 On the Home, `ocx sync` fans out only after it commits a current catalog. Use `--local-only`
-to suppress propagation and `--json` to inspect Home and Child results. Fan-out never asks a Child
-to restart a Codex app or app-server; use GOAT or `ocx sync --restart-codex` on that Child. Its
-pinned sync can still restart its own OpenCodex client runtime after applying changed Home settings.
+to suppress propagation, `--json` to inspect Home and Child results, and `--child <linkId>`
+(repeatable) to fan out only to those links (the others read `not-selected`). Fan-out asks a Child to
+restart Codex only with `--restart-children` (app-servers) or `--restart-children=codex --yes`: each
+Child is synced first, and its restart, never its sync, is skipped while it relays a model request
+(`restart-skipped:link-active`), on Windows and on `ocx-child`, with exit 6. A Child held by a Child
+operation is skipped as `child-busy`. Its pinned sync can still restart its own OpenCodex client runtime after applying changed Home settings.
 A Child sync already running can continue after the Home times out its local SSH process.
 
 ### Checking Children from the Home (`ocx link check`)
@@ -371,6 +374,21 @@ Windows Children take `sync` only: restarts are `unsupported` (`windows-restart`
 `unsupported` (`windows-apply`). `ocx-child` Children report restart and update `unsupported`. The CLI
 verbs need a Home bound to loopback; on any other Home they exit 1, these operations are not available
 there, and the dashboard has no controls for them. While a job holds a link, `ocx link revoke` on it is refused with 409 `link_operation_in_progress` (it does not wait); while a revoke runs, a job for that link is refused the same way, or its item ends `busy`.
+
+### Automatic catalog fan-out and the Child policy (`ocx link policy`)
+
+On a Home with links, a Home catalog change reaches each eligible Child without anyone running
+`ocx sync`: about 60 s after the change settles, the Home runs the same pinned sync as `ocx link sync`
+(no Codex restart unless `childCodexRestart` enables one) on every connected, Home-initiated Child whose last Home-run sync predates the change. A
+busy Child is synced only when its Codex settings already match the Home and its runtime restarted after that apply; failures back off from 5
+minutes to 6 hours. Automatic jobs show `trigger: "auto"` in the job document.
+
+`ocx link policy` (no flags) reads the knobs: `catalogFanout` (`auto` default, or `manual`),
+`childCodexRestart` (`never` default, or `app-server-when-idle`), `updates` (`auto-when-idle`
+default, `notify`, `off`) and `idleAfterMs` (`--idle-after-minutes <1-60>`, default 10). Changing the
+Child policy needs the operator's request; reading it does not. A `warning: "policy-file-invalid"`
+means fan-out and updates are off; a save keeps unnamed settings off, so re-enabling needs `--catalog-fanout auto` and an `--updates` mode. The fan-out fixes the Child's
+catalog file; a Codex app-server already running there keeps its old list until restarted. This release stores `updates` but starts no automatic update yet.
 
 ## Key rotation is a two-step commit
 
