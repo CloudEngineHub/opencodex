@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleLinkRoutes, type LinkRouteState } from "../../src/server/management/link-routes";
+import { liveResidual } from "../../src/server/management/link-enrollment";
 import type { ManagementContext } from "../../src/server/management/context";
 import type { OcxConfig } from "../../src/types";
 import type { LinkStore } from "../../src/link/store";
@@ -162,6 +163,8 @@ function buildHarness() {
     remotePlatform: "posix",
     ocxVersion: "2.98.0",
   });
+  // A real confirm-host also trusts the probed line; apply checks it is still the trusted one.
+  writeFileSync(knownHosts, "devbox ssh-ed25519 AAAA\nbarebox ssh-ed25519 AAAA\n");
 
   async function request(method: string, path: string, body?: unknown, principal: "admin-token" | "gui-session" = "admin-token") {
     const url = new URL(`http://127.0.0.1:10100${path}`);
@@ -259,7 +262,7 @@ describe("Home Remote Link enrollment, SSH plant, and --purge removal with ephem
       alias: "barebox",
       fingerprint,
       keyType: "ED25519",
-      knownHostLine: "barebox ssh-ed25519 SECRET_LINE",
+      knownHostLine: "barebox ssh-ed25519 U0VDUkVUX0xJTkU",
       probedAt: 1_800_000_000_000,
       remotePlatform: "posix",
     });
@@ -336,6 +339,14 @@ describe("Home Remote Link enrollment, SSH plant, and --purge removal with ephem
     expect(body2.error.code).toBe("child_port_busy");
     expect(body2.residual).toBe(true);
     expect(body2.recovery).toContain("detach --purge");
+    expect(body2).toMatchObject({ residualKind: "plant", remotePlatform: "posix", recovery: "Run ~/.cache/opencodex/bin/ocx-child detach --purge on the Child before retrying." });
+  });
+
+  test("the live residual answer names the managed binary where the Child's platform keeps it", () => {
+    expect(liveResidual("plant", "windows")).toEqual({ residualKind: "plant", remotePlatform: "windows",
+      recovery: 'Run "%LOCALAPPDATA%\\opencodex\\bin\\ocx-child.exe" detach --purge in Command Prompt on the Child, or "%USERPROFILE%\\.cache\\opencodex\\bin\\ocx-child.exe" detach --purge where LOCALAPPDATA is not set, before retrying.' });
+    expect(liveResidual("ephemeral", "windows")).toEqual({ residualKind: "enrollment", remotePlatform: "windows", recovery: "Run ocx-child detach (or ocx disconnect) on the Child before retrying." });
+    expect(liveResidual("full", undefined)).toEqual({ residualKind: "enrollment", recovery: "Run ocx disconnect and ocx restart on the Child before retrying." });
   });
 
   test("reports hash_tool_unavailable when the Child cannot verify the planted binary's SHA-256", async () => {
@@ -411,4 +422,3 @@ describe("Home Remote Link enrollment, SSH plant, and --purge removal with ephem
     expect(body.recovery).not.toContain("ocx restart");
   });
 });
-

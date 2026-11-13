@@ -33,7 +33,9 @@ import {
 import { isUsageDebugEnabled } from "../../usage/debug";
 import { isNonReplayableResponse, isReplayRefusalResponse } from "../../lib/upstream-retry";
 import { sanitizeNonReplayableUpstreamError } from "./non-replayable-error";
-import { teeWithBoundedInspection } from "../inspection-tee";
+import { sliceChunks, teeWithBoundedInspection } from "../inspection-tee";
+import { markPacedStream } from "../../lib/paced-stream";
+import { LINK_PACED_SLICE_BYTES, linkTurnPacesReads } from "../link-turn";
 import {
   codexForwardTerminalOutcomeRecorder,
   usesCodexForwardPoolAuth,
@@ -174,11 +176,13 @@ import { restoreRoutedToolSearchCallsInJson } from "../../responses/tool-search-
 import { responsesJsonToSseStream } from "../responses-json-events";
 import { isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers";
 import {
+  BUFFERED_RESPONSES_TOTAL_TIMEOUT_MS,
   bufferedResponsesReadOptions,
   collectBufferedResponsesSse,
   type BufferedResponsesSseFailure,
   type BufferedResponsesSseResult,
 } from "./buffered-sse-json";
+import { bufferedResetSelectionStartedAt } from "./passthrough-completion";
 
 const PLAINTEXT_V2_SSE_PREFIX_LIMIT = 4096;
 
@@ -439,7 +443,7 @@ export async function deliverPassthroughResponse(
 ): Promise<Response> {
   const { route } = requestState;
   // The proof must belong to the response whose headers are published.
-  const arrivalMainDispatch = liveMainQuotaDispatch(admissionState.authCtx, route.provider);
+  const arrivalMainDispatch = liveMainQuotaDispatch(admissionState.authCtx, route.provider, nativeExchange.upstreamResponse);
   const { logCtx, config, options, req } = requestContext;
   const {
     codexSafetyBufferingOptions,
@@ -977,10 +981,11 @@ export async function deliverPassthroughResponse(
 
       if (canonicalBufferedJson) {
         const signal = options.abortSignal ?? req.signal;
+        // A turn whose head waited on reset selection keeps the deadline that wait already spent.
         const bufferedRead = bufferedResponsesReadOptions(resolveStallTimeoutMs(
           config.stallTimeoutSec,
           { localUpstream: nativeExchange.localUpstream },
-        ));
+        ), BUFFERED_RESPONSES_TOTAL_TIMEOUT_MS, bufferedResetSelectionStartedAt(nativeExchange.upstreamResponse) ?? Date.now());
         const failBufferedTurn = (
           message: string,
           failure?: BufferedResponsesSseFailure,
@@ -1196,6 +1201,10 @@ export async function deliverPassthroughResponse(
       }
 
       const relayPlatform = relayPlatformForTests ?? process.platform;
+      // A Remote Link turn while the link WebSocket feature is on reads its upstream only as its client drains (#8601);
+      // every other request keeps the relays' read-ahead below. Its chunks travel in slices, and the paced mark makes the
+      // tee, the eager relay and every stage after them read one slice at a time as the client asks (src/lib/paced-stream.ts).
+      if (linkTurnPacesReads(logCtx)) passthroughSseBody = markPacedStream(sliceChunks(passthroughSseBody, LINK_PACED_SLICE_BYTES));
       // #864: win32 rewrite traffic must never enter the tee()+JS-pull chain
       // (Bun#32111 JS-sink segfault — text frames pass, the terminal block is
       // lost). The eager single reader applies the same rewrites inline.
