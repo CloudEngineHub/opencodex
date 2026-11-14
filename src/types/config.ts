@@ -463,7 +463,7 @@ export interface OcxRemoteGuiConfig {
   allowInsecureHttp?: boolean;
 }
 
-export type OcxConnectedClientId = "codex" | "claude";
+export type OcxConnectedClientId = "codex" | "claude" | "claude-desktop" | "grok" | import("../clients/client-ids").ExportClientId;
 
 /**
  * Redaction policy for management and CLI projections (#3859).
@@ -1072,6 +1072,7 @@ export interface OcxConfig extends OcxLinkHomeConfig {
   shutdownTimeoutMs?: number;
   /** Advertise supports_websockets so Codex opens the WS endpoint. Default false; set true to opt in. */ websockets?: boolean;
   /** Accept the Responses WebSocket from linked Children over the Remote Link. Default false; needs websockets too. */ linkResponsesWebsocket?: boolean;
+  /** On a Remote Link Child: true keeps Codex on HTTP over the link even when the Home offers the link WebSocket. Default: follow the Home. */ linkResponsesWebsocketOptOut?: boolean;
   /** Experimental single-lane native OpenAI WebSocket steering; default off. */
   codexNativeSteering?: boolean;
   /** Experimental, default-off saved function-result injection on native multi-agent WebSockets. */
