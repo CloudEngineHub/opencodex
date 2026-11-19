@@ -1,10 +1,12 @@
 import { carryProxyError, proxyErrorPresentation, isProxyError, rememberProxyErrorMessage } from "../../lib/client-error-body";
 import { providerAffinityGenerationIsCurrent } from "../../providers/api-key-selection";
 import { bindAnthropicRejectionResponse } from "../../adapters/anthropic-rejection-memo";
+import { hostedAdvisorCredentials } from "../../adapters/anthropic/advisor-tool";
 import { deferPhysicalSendReporter } from "./deferred-send-reporter";
 import { responsesSpendTarget } from "./request-spend-target";
+import { adapterResponseSpendObserver, bindAdapterResponseSpend } from "./request-spend";
 import { rotateAnthropicAccountOnResponseForInstance } from "../../oauth/anthropic-account-refusal";
-import type { ResponsesRequestContext } from "./core-options";
+import { responsesTimeoutProvider, type ResponsesRequestContext } from "./core-options";
 import type { PreparedResponsesRequest } from "./request-prepare";
 import type { ResponsesTransport } from "./request-transport";
 import type { ResponsesSidecarAuth } from "./request-sidecar-auth";
@@ -39,6 +41,7 @@ import {
 } from "../../lib/upstream-retry";
 import { unwrapUpstreamRetryEvidenceError } from "../../codex/auth-context";
 import { AdmissionModelDeniedError, MODEL_NOT_ALLOWED_FOR_KEY } from "../admission-model-scope";
+import { HostedAdvisorSpendRefusal } from "./policy-request-scope";
 import { redactSecretString } from "../../lib/redact";
 import { resolveWireProtocolOverride } from "../adapter-resolve";
 import { bindRouteReasoningReplayScope } from "./core-replay";
@@ -66,7 +69,7 @@ import {
   readResponseStreamWithInactivity,
   ResponseBodyInactivityError,
 } from "../../lib/response-body-inactivity";
-import { resolveStallTimeoutMs } from "../../stall-timeout";
+import { providerStallTimeoutSec, resolveStallTimeoutMs } from "../../stall-timeout";
 import { guardTerminalEventStream } from "./terminal-guard";
 
 /** One responsibility of the Responses request pipeline; state owners are explicit. */
@@ -161,6 +164,7 @@ export function createAdapterContinuations(
       return { type: "error", message: "client closed request during terminal continuation", status: 499 };
     }
     const refusal = unwrapUpstreamRetryEvidenceError(error);
+    if (refusal instanceof HostedAdvisorSpendRefusal) return refusal.event();
     if (refusal instanceof AdmissionModelDeniedError || refusal instanceof SendBudgetExhaustedError) rememberProxyErrorMessage(logCtx, refusal.message, { status: refusal instanceof AdmissionModelDeniedError ? 403 : 429,
       type: refusal instanceof AdmissionModelDeniedError ? MODEL_NOT_ALLOWED_FOR_KEY : "rate_limit_error", code: refusal instanceof AdmissionModelDeniedError ? MODEL_NOT_ALLOWED_FOR_KEY : refusal.code, presentation: refusal instanceof AdmissionModelDeniedError ? "scope" : "send" });
     if (refusal instanceof AdmissionModelDeniedError) {
@@ -287,10 +291,12 @@ export function createAdapterContinuations(
           ? fetchWithTransientRetry
           : fetchWithResetRetry;
         const continuationReporter = transientSendReporter();
-        const deferredContinuation = (continuationTransientPolicy || sendBudgetState.adapterSendBudget?.spendEnforced)
-          && route.providerName === "github-copilot" && route.provider.authMode !== "forward"
+        const countsContinuationSends = continuationTransientPolicy || anthropicInstance || sendBudgetState.adapterSendBudget?.spendEnforced;
+        const deferredContinuation = countsContinuationSends && (hostedAdvisorCredentials.has(builtContinuationRequest)
+          || ((continuationTransientPolicy || sendBudgetState.adapterSendBudget?.spendEnforced)
+            && route.providerName === "github-copilot" && route.provider.authMode !== "forward"))
           ? deferPhysicalSendReporter(continuationReporter) : undefined;
-        return await fetchContinuationWithRetryPolicy(
+        const continuationResponse = await fetchContinuationWithRetryPolicy(
           recovery => {
             sendBudgetState.adapterSendBudget?.startRequest?.(responsesSpendTarget(logCtx, route.providerName));
             transportState.noteRoutedAttemptSend(continuationEstimate, recovery ?? replayKind);
@@ -320,7 +326,7 @@ export function createAdapterContinuations(
             // Same request-scoped budget as the initial send and the 429/rotation refetches:
             // a terminal-guard continuation is another leg of ONE request, so handing it a
             // fresh `attempts` would let one request exceed the configured total-send ceiling.
-            ...(continuationTransientPolicy || anthropicInstance || sendBudgetState.adapterSendBudget?.spendEnforced
+            ...(countsContinuationSends
               ? {
                 attempts: Math.min(continuationTransientPolicy?.attempts ?? 1,
                   remainingTransientSendBudget(continuationTransientPolicy?.attempts ?? 1)
@@ -329,7 +335,11 @@ export function createAdapterContinuations(
               }
               : {}),
           },
-          );
+        );
+        if (nextParsed._anthropicImageOwner && sendBudgetState.adapterSendBudget?.spendEnforced) {
+          bindAdapterResponseSpend(continuationResponse, continuationReporter.recordUsage);
+        }
+        return continuationResponse;
       } finally {
         builtContinuationRequest.releaseBodyObservation?.();
       }
@@ -770,18 +780,25 @@ export function createAdapterContinuations(
       // The shared signal is not aborted on timeout: this generator must still emit
       // the error that the already-live Responses bridge turns into a terminal.
       const parse = async function* (current: Response): AsyncGenerator<AdapterEvent> {
-        const bodyInactivityMs = resolveStallTimeoutMs(config.stallTimeoutSec, { localUpstream: isLocalUpstream(transportState.sameTargetRequest?.url ?? route.provider.baseUrl) });
+        const bodyInactivityMs = resolveStallTimeoutMs(providerStallTimeoutSec(config, responsesTimeoutProvider(options, route.provider)), { localUpstream: isLocalUpstream(transportState.sameTargetRequest?.url ?? route.provider.baseUrl) });
         if (!current.ok) {
           yield await adapterExchange.thinkingSignatureRecovery.projectHttpFailure(current, upstream.signal);
-        } else if (nextParsed.stream) {
-          yield* readResponseStreamWithInactivity(current, upstream.signal, bodyInactivityMs,
-            guarded => transportState.activeAdapter.parseStream(guarded, translatorBudget, logCtx.activeTierMetadata));
-        } else if (transportState.activeAdapter.parseResponse) {
-          yield* await readResponseBodyWithInactivity(current, upstream.signal, bodyInactivityMs,
-            guarded => transportState.activeAdapter.parseResponse!(guarded, translatorBudget, logCtx.activeTierMetadata));
-        } else {
+          return;
+        }
+        if (!nextParsed.stream && !transportState.activeAdapter.parseResponse) {
           try { void current.body?.cancel().catch(() => {}); } catch { /* closed */ }
           yield { type: "error", message: "Provider continuation does not support response parsing" };
+          return;
+        }
+        const observeSpend = adapterResponseSpendObserver(current);
+        const events = nextParsed.stream
+          ? readResponseStreamWithInactivity(current, upstream.signal, bodyInactivityMs,
+            guarded => transportState.activeAdapter.parseStream(guarded, translatorBudget, logCtx.activeTierMetadata))
+          : await readResponseBodyWithInactivity(current, upstream.signal, bodyInactivityMs,
+            guarded => transportState.activeAdapter.parseResponse!(guarded, translatorBudget, logCtx.activeTierMetadata));
+        for await (const event of events) {
+          observeSpend?.(event);
+          yield event;
         }
       };
       yield* adapterExchange.thinkingSignatureRecovery.wrap(parse(response), async function* () {

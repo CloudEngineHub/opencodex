@@ -82,6 +82,7 @@ import {
   type VertexDiscoveryAuth,
 } from "../../providers/google-vertex-model-discovery";
 import { routedSlug, slugEquals } from "../../providers/slug-codec";
+import { isXaiGrokOAuth, readXaiLegacyPrivacyError, XAI_LEGACY_PRIVACY_MESSAGE } from "../../providers/xai-privacy-mode";
 import { clearAccountQuotaCache, clearProviderQuotaCache, fetchProviderQuotaReports } from "../../providers/quota";
 import { clearPassiveKeyLimits, listPassiveKeyLimits, passiveProviderOwnership } from "../../providers/passive-key-observation";
 import { providerRoutingQuota } from "./provider-routing-quota";
@@ -921,8 +922,8 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       retainModels: p.retainModels,
       omitReasoningEffortWithToolsModels: p.omitReasoningEffortWithToolsModels,
       upstreamHttpVersion: p.upstreamHttpVersion,
-      // As configured: unset on canonical `openai` means upstream WebSocket, so never coerce to false.
-      upstreamWebsocket: p.upstreamWebsocket,
+      transientRetryOn5xx: p.transientRetryOn5xx,
+      upstreamWebsocket: p.upstreamWebsocket, // Unset keeps upstream WebSocket enabled for canonical OpenAI.
       authMode: p.authMode,
       apiKeyTransport: p.apiKeyTransport,
       disabled: p.disabled === true,
@@ -1671,6 +1672,7 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     if ((prov.authMode === "oauth" || effectiveGoogleMode(name, prov) === "vertex") && !apiKey) {
       return jsonResponse({ ok: false, latencyMs: 0, error: "static catalog only — upstream not verified (not logged in)" });
     }
+    if (prov.adapter === "m365-copilot") return (await import("./m365-copilot-provider-probe")).probeM365CopilotProvider(name, prov, snapshot, req.signal);
     if (prov.adapter === "zed") return (await import("./zed-provider-probe")).probeZedProvider(prov, apiKey, snapshot?.providerUserId);
     if (prov.adapter === "cursor") {
       const started = Date.now();
@@ -1757,6 +1759,9 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
         });
       }
       if (!res.ok) {
+        if (isXaiGrokOAuth(name, prov) && await readXaiLegacyPrivacyError(res)) {
+          return jsonResponse({ ok: false, latencyMs, error: XAI_LEGACY_PRIVACY_MESSAGE });
+        }
         try {
           void res.body?.cancel().catch(() => undefined);
         } catch {
@@ -1986,8 +1991,7 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     return jsonResponse({ error: "provider string and enabled boolean are required" }, 400);
   }
 
-  // Complete GUI picker presets, derived from the canonical provider registry. The GUI is a
-  // standalone Vite package, so it consumes this runtime view instead of importing repo-root src.
+  // The standalone Vite GUI consumes these canonical registry presets through the API.
   if (url.pathname === "/api/provider-presets" && req.method === "GET") {
     return jsonResponse({ providers: deriveProviderPresets() });
   }
